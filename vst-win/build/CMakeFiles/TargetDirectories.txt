@@ -1,3 +1,0 @@
-/home/milann/Bureau/flstud/vst-win/build/CMakeFiles/SoulForgeSynth.dir
-/home/milann/Bureau/flstud/vst-win/build/CMakeFiles/edit_cache.dir
-/home/milann/Bureau/flstud/vst-win/build/CMakeFiles/rebuild_cache.dir
