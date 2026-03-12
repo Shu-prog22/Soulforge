@@ -42,6 +42,14 @@ void SynthVoice::startNote(int midiNote, float /*velocity*/,
         currentFreq = freq * currentPreset->slideFrom;
         targetFreq  = freq * currentPreset->slideTarget;
     }
+    // GFUNK: portamento from previous pitch
+    if (currentPreset && currentPreset->engine == EngineType::GFUNK
+        && currentPreset->portaDur > 0.0f && currentFreq > 0.0)
+    {
+        // keep currentFreq as start, slide to new freq
+        targetFreq = freq;
+        // currentFreq stays as previous note freq
+    }
 }
 
 void SynthVoice::stopNote(float, bool allowTailOff)
@@ -96,7 +104,7 @@ void SynthVoice::renderNextBlock(AudioBuffer<float>& buffer,
             }
         }
 
-        // ── BASS808 pitch slide ───────────────────────────────────────────────
+        // ── Pitch slide (BASS808 + GFUNK portamento) ──────────────────────────
         if (currentPreset->engine == EngineType::BASS808)
         {
             if (currentFreq > targetFreq)
@@ -105,6 +113,14 @@ void SynthVoice::renderNextBlock(AudioBuffer<float>& buffer,
                 double step = (currentFreq - targetFreq) / jmax(slideSamples, 1.0);
                 currentFreq = jmax(targetFreq, currentFreq - step);
             }
+        }
+        else if (currentPreset->engine == EngineType::GFUNK && currentPreset->portaDur > 0.0f)
+        {
+            double slideSamples = currentPreset->portaDur * sampleRate;
+            if (currentFreq < targetFreq)
+                currentFreq = jmin(targetFreq, currentFreq + (targetFreq - currentFreq) / jmax(slideSamples, 1.0) * 4.0);
+            else if (currentFreq > targetFreq)
+                currentFreq = jmax(targetFreq, currentFreq - (currentFreq - targetFreq) / jmax(slideSamples, 1.0) * 4.0);
         }
 
         // ── Synthesis ─────────────────────────────────────────────────────────
@@ -124,6 +140,11 @@ void SynthVoice::renderNextBlock(AudioBuffer<float>& buffer,
             case EngineType::GUITAR:    sample = renderGUITAR();    break;
             case EngineType::BAGPIPES:  sample = renderBAGPIPES();  break;
             case EngineType::JOLA_EP:   sample = renderJOLA_EP();   break;
+            case EngineType::OCTOBER:   sample = renderOCTOBER();   break;
+            case EngineType::SUPERSAW:  sample = renderSUPERSAW();  break;
+            case EngineType::GFUNK:     sample = renderGFUNK();     break;
+            case EngineType::ASTRO:     sample = renderASTRO();     break;
+            case EngineType::YEEZY:     sample = renderYEEZY();     break;
             default:                    sample = renderLegacy();    break;
         }
 
@@ -202,6 +223,31 @@ void SynthVoice::renderNextBlock(AudioBuffer<float>& buffer,
                 droneFilter.setCoeffs(droneCut, sampleRate, 0.7);
             }
             else if (currentPreset->engine == EngineType::JOLA_EP)
+            {
+                cutoff = currentPreset->legLpHz;
+                Q      = currentPreset->legLpQ;
+            }
+            else if (currentPreset->engine == EngineType::OCTOBER)
+            {
+                cutoff = currentPreset->legLpHz;
+                Q      = currentPreset->legLpQ;
+            }
+            else if (currentPreset->engine == EngineType::SUPERSAW)
+            {
+                cutoff = currentPreset->legLpHz;
+                Q      = currentPreset->legLpQ;
+            }
+            else if (currentPreset->engine == EngineType::GFUNK)
+            {
+                cutoff = currentPreset->legLpHz;
+                Q      = currentPreset->legLpQ;
+            }
+            else if (currentPreset->engine == EngineType::ASTRO)
+            {
+                cutoff = currentPreset->legLpHz;
+                Q      = currentPreset->legLpQ;
+            }
+            else if (currentPreset->engine == EngineType::YEEZY)
             {
                 cutoff = currentPreset->legLpHz;
                 Q      = currentPreset->legLpQ;
@@ -605,6 +651,143 @@ double SynthVoice::renderJOLA_EP()
     return mixed * epEnv * tremoloMod * 0.50;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OCTOBER — underwater muffled keys (sine + sub, very low LP)
+// ─────────────────────────────────────────────────────────────────────────────
+double SynthVoice::renderOCTOBER()
+{
+    const auto& p = *currentPreset;
+
+    // Slightly detuned sine pair
+    double f1 = freq * std::pow(2.0,  (double)p.legDetune / 1200.0);
+    double f2 = freq * std::pow(2.0, -(double)p.legDetune / 1200.0);
+
+    double osc  = std::sin(phase[0] * MathConstants<double>::twoPi) * 0.5
+                + std::sin(phase[1] * MathConstants<double>::twoPi) * 0.5;
+    advPhase(phase[0], f1);
+    advPhase(phase[1], f2);
+
+    // Sub sine at half freq
+    double sub = std::sin(phase[2] * MathConstants<double>::twoPi) * p.legSubGain;
+    advPhase(phase[2], freq * 0.5);
+
+    return (osc + sub) * 0.55;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPERSAW — multi-saw unison (1–7 oscillators, tanh saturation)
+// ─────────────────────────────────────────────────────────────────────────────
+double SynthVoice::renderSUPERSAW()
+{
+    const auto& p = *currentPreset;
+
+    int n = jlimit(1, 7, p.numSaws);
+    double out = 0.0;
+
+    for (int i = 0; i < n; ++i)
+    {
+        double cents;
+        if (n == 1) cents = 0.0;
+        else        cents = p.detuneCents * (-1.0 + 2.0 * i / (double)(n - 1));
+        double f = freq * std::pow(2.0, cents / 1200.0);
+        out += sawSample(phase[i]);
+        advPhase(phase[i], f);
+    }
+    out /= jmax(n, 1);
+
+    return tanh_approx(out * p.saturation) / jmax(tanh_approx(p.saturation), 0.001) * 0.80;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GFUNK — sawtooth + portamento + saturation + sub
+// ─────────────────────────────────────────────────────────────────────────────
+double SynthVoice::renderGFUNK()
+{
+    const auto& p = *currentPreset;
+
+    double playFreq = (p.portaDur > 0.0f) ? currentFreq : freq;
+
+    // Main saw + detuned saw
+    double f1 = playFreq * std::pow(2.0,  (double)p.detuneCents / 1200.0);
+    double f2 = playFreq * std::pow(2.0, -(double)p.detuneCents / 1200.0);
+    double osc = sawSample(phase[0]) * 0.5 + sawSample(phase[1]) * 0.5;
+    advPhase(phase[0], f1);
+    advPhase(phase[1], f2);
+
+    osc = tanh_approx(osc * p.saturation) / jmax(tanh_approx(p.saturation), 0.001);
+
+    // Sub sine
+    double sub = std::sin(phase[2] * MathConstants<double>::twoPi) * p.legSubGain;
+    advPhase(phase[2], playFreq * 0.5);
+
+    return (osc + sub) * 0.55;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASTRO — triangle + wobble LFO + bitcrush + distortion (Travis flute sound)
+// ─────────────────────────────────────────────────────────────────────────────
+double SynthVoice::renderASTRO()
+{
+    const auto& p = *currentPreset;
+
+    // Wobble LFO modulating frequency
+    double lfoVal = std::sin(lfoPhase * MathConstants<double>::twoPi);
+    double wobFreq = freq * (1.0 + lfoVal * p.wobbleDepth);
+    advPhase(lfoPhase, p.wobbleRate);
+
+    double sample = triSample(phase[0]);
+    advPhase(phase[0], wobFreq);
+
+    // Bitcrush
+    if (p.bitSteps > 0)
+        sample = bitcrush(sample, p.bitSteps);
+
+    // Soft distortion
+    sample = softclip(sample, p.distAmount);
+
+    return sample * 0.55;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// YEEZY — 3 modes: 0=soul-chop triangle, 1=industrial square, 2=sine+sub
+// ─────────────────────────────────────────────────────────────────────────────
+double SynthVoice::renderYEEZY()
+{
+    const auto& p = *currentPreset;
+    double sample = 0.0;
+
+    if (p.yeezMode == 0)
+    {
+        // Soul-chop: triangle with simple high-pass (1-pole difference)
+        double tri = triSample(phase[0]);
+        advPhase(phase[0], freq);
+        // Simple 1-pole HP: y[n] = x[n] - x[n-1] * coeff
+        double hpCoeff = 1.0 - (MathConstants<double>::twoPi * p.hpHz / sampleRate);
+        hpCoeff = jlimit(0.0, 0.9999, hpCoeff);
+        double hpOut = tri - hpCoeff * driftPhase; // driftPhase reused as HP state
+        driftPhase = tri * (1.0 - hpCoeff);
+        sample = softclip(hpOut, p.saturation) * 0.80;
+    }
+    else if (p.yeezMode == 1)
+    {
+        // Industrial: square with hard clip
+        double sq = squareSample(phase[0]);
+        advPhase(phase[0], freq);
+        double driven = sq * p.saturation;
+        sample = jlimit(-1.0, 1.0, driven) * 0.70;
+    }
+    else // mode 2: cathedral sine + sub
+    {
+        double s = std::sin(phase[0] * MathConstants<double>::twoPi);
+        advPhase(phase[0], freq);
+        double sub = std::sin(phase[1] * MathConstants<double>::twoPi) * p.legSubGain;
+        advPhase(phase[1], freq * 0.5);
+        sample = softclip(s, p.saturation) * 0.6 + sub;
+    }
+
+    return sample;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // SoulForgeSynthAudioProcessor
 // ═════════════════════════════════════════════════════════════════════════════
@@ -657,10 +840,16 @@ void SoulForgeSynthAudioProcessor::addPreset(const String& folder, const PresetP
 // ─────────────────────────────────────────────────────────────────────────────
 void SoulForgeSynthAudioProcessor::buildBank()
 {
-    folderOrder = { "PADS","BASS","GHIBLI","DS","SCIFI","VIKINGS","GYM","BASS808","VAPOR","HORROR",
+    folderOrder = { "PIANO","VOICES","LEADS",
+                    "PADS","BASS","GHIBLI","DS","SCIFI","VIKINGS","GYM","BASS808","VAPOR","HORROR",
                     "SAMURAI","CHERNOBYL","PIRATES","TRIBAL","CURIOSITY","XFILES",
-                    "FLUTES","GUITARS","BAGPIPES","JOLA_EP" };
+                    "FLUTES","GUITARS","BAGPIPES","JOLA_EP",
+                    "ANIME","RAP_FR","OCTOBER","KDOT","STARBOY","ASTRO",
+                    "YEEZY","GIVEON","DAMSO","CAS","TORY","RNB","PHONK_BR" };
 
+    folders["PIANO"]     = { "PIANO",     Colour(0xfff0d060) };
+    folders["VOICES"]    = { "VOICES",    Colour(0xffff80cc) };
+    folders["LEADS"]     = { "LEADS",     Colour(0xffffe040) };
     folders["PADS"]      = { "PADS",      Colour(0xffe03030) };
     folders["BASS"]      = { "BASS",      Colour(0xffe04040) };
     folders["GHIBLI"]    = { "GHIBLI",    Colour(0xff4caf50) };
@@ -681,6 +870,19 @@ void SoulForgeSynthAudioProcessor::buildBank()
     folders["GUITARS"]   = { "GUITARS",   Colour(0xffcc8844) };
     folders["BAGPIPES"]  = { "BAGPIPES",  Colour(0xff00aa44) };
     folders["JOLA_EP"]   = { "JOLA EP",   Colour(0xffcc8833) };
+    folders["ANIME"]     = { "ANIME",     Colour(0xffff69b4) };
+    folders["RAP_FR"]    = { "RAP FR",    Colour(0xff0055ff) };
+    folders["OCTOBER"]   = { "OCTOBER",   Colour(0xff2040a0) };
+    folders["KDOT"]      = { "KDOT",      Colour(0xff8b0000) };
+    folders["STARBOY"]   = { "STARBOY",   Colour(0xffc0003c) };
+    folders["ASTRO"]     = { "ASTRO",     Colour(0xff8b4513) };
+    folders["YEEZY"]     = { "YEEZY",     Colour(0xffc8a000) };
+    folders["GIVEON"]    = { "GIVEON",    Colour(0xff2c1654) };
+    folders["DAMSO"]     = { "DAMSO",     Colour(0xff1a1a2e) };
+    folders["CAS"]       = { "CAS",       Colour(0xfff5a0c8) };
+    folders["TORY"]      = { "TORY",      Colour(0xffe8a030) };
+    folders["RNB"]       = { "RNB",       Colour(0xffc47028) };
+    folders["PHONK_BR"]  = { "PHONK BR",  Colour(0xff22bb44) };
 
     // ── PADS (legacy engine — sine/triangle detuned) ──────────────────────────
     auto pad = [&](const char* id, const char* name, uint32 col, float atk, float rel,
@@ -1310,6 +1512,1418 @@ void SoulForgeSynthAudioProcessor::buildBank()
     ep("ep_soul",   "SOUL EP",   0xffcc8833, 0.002f,2.8f, 3.0f,0.09f,0.14f,2.2f,0.20f,2.0f,1000,1.0f, 5);
     ep("ep_electrc","ELECTRIC",  0xff8888ff, 0.001f,2.2f, 4.0f,0.07f,0.22f,1.8f,0.24f,1.6f,1800,1.6f, 4);
     ep("ep_warm",   "WARM EP",   0xffdd9955, 0.003f,3.2f, 2.8f,0.10f,0.12f,2.5f,0.18f,2.3f, 950,0.9f, 6);
+
+    // ── PIANO (Legacy sine/triangle) ──────────────────────────────────────────
+    // params: id, name, col, atk, rel, wave, det, lp, Q, sub
+    auto pno = [&](const char* id, const char* name, uint32 col,
+                   float atk, float rel, int wave, float det, float lp, float Q, float sub=0.f){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::Legacy; p.legWave=wave; p.legDetune=det; p.legLpHz=lp; p.legLpQ=Q; p.legSubGain=sub;
+        addPreset("PIANO",p);
+    };
+    pno("steinway",  "STEINWAY",  0xfff0d060, 0.005f,2.5f, 0, 4,  2800,0.8f,0.10f);
+    pno("upright",   "UPRIGHT",   0xffd4a840, 0.006f,1.8f, 0, 6,  2000,0.7f,0.08f);
+    pno("boudoir",   "BOUDOIR",   0xffc89030, 0.008f,2.2f, 0, 5,  2200,0.7f,0.12f);
+    pno("concert",   "CONCERT",   0xffffe880, 0.004f,3.0f, 0, 3,  3200,0.9f,0.12f);
+    pno("baroque",   "BAROQUE",   0xffe8c060, 0.003f,1.5f, 1, 3,  4000,1.2f,0.00f);
+    pno("lofi_pno",  "LOFI",      0xffc8a878, 0.008f,1.8f, 1,10,  1200,0.6f,0.10f);
+    pno("cassette",  "CASSETTE",  0xffb89060, 0.010f,1.5f, 1,14,   900,0.5f,0.08f);
+    pno("dusty",     "DUSTY",     0xffa07850, 0.012f,1.6f, 1,12,  1000,0.5f,0.10f);
+    pno("midnight",  "MIDNIGHT",  0xff806040, 0.015f,2.0f, 1,15,   700,0.5f,0.08f);
+    pno("wabi",      "WABI",      0xff907858, 0.020f,1.4f, 1,18,   600,0.4f,0.06f);
+    pno("pno_rhodes","RHODES",    0xff60c8e0, 0.003f,1.5f, 0, 3,  4000,1.5f,0.00f);
+    pno("pno_wurly", "WURLY",     0xff40a0c0, 0.004f,1.3f, 2, 4,  3500,1.8f,0.00f);
+    pno("clavinet",  "CLAVI",     0xff20c080, 0.002f,0.9f, 2, 2,  5000,2.5f,0.00f);
+    pno("dyno",      "DYNO",      0xff50d0a0, 0.003f,1.6f, 0, 3,  5000,2.0f,0.00f);
+    pno("suitcase",  "SUITCASE",  0xff30b8b0, 0.005f,2.0f, 0, 5,  3000,1.2f,0.10f);
+    pno("dark_pno",  "DARK",      0xff8060c0, 0.010f,3.5f, 0,10,   600,0.5f,0.20f);
+    pno("requiem",   "REQUIEM",   0xff6040a0, 0.020f,4.0f, 0,12,   400,0.4f,0.25f);
+    pno("noir",      "NOIR",      0xff5030c0, 0.008f,3.0f, 0, 8,   700,0.5f,0.18f);
+    pno("gothic",    "GOTHIC",    0xff7050b0, 0.015f,3.5f, 0,14,   500,0.4f,0.22f);
+    pno("abyss_p",   "ABYSS",     0xff4020a0, 0.030f,4.5f, 0,18,   300,0.4f,0.30f);
+    pno("toy_pno",   "TOY",       0xfff080a0, 0.002f,0.8f, 1, 2,  8000,2.5f,0.00f);
+    pno("musicbox",  "MUSICBOX",  0xffe870b0, 0.001f,1.5f, 0, 1,  6000,3.0f,0.00f);
+    pno("kalimba",   "KALIMBA",   0xffff90c0, 0.001f,2.0f, 0, 2,  7000,2.8f,0.00f);
+    pno("xylophone", "XYLO",      0xfff060a0, 0.001f,0.6f, 1, 1,  9000,2.0f,0.00f);
+    pno("glocken",   "GLOCKEN",   0xffe8a0c8, 0.001f,1.8f, 0, 1,  8000,3.5f,0.00f);
+    pno("prepared",  "PREPARED",  0xffa0d080, 0.010f,2.0f, 2,20,  3000,1.5f,0.10f);
+    pno("cluster",   "CLUSTER",   0xff80c060, 0.008f,2.5f, 3,25,  2000,0.8f,0.20f);
+    pno("inside",    "INSIDE",    0xff60a040, 0.005f,3.0f, 1,15,  4000,1.2f,0.10f);
+    pno("bowed",     "BOWED",     0xff90c070, 0.500f,3.5f, 1, 8,  1500,0.6f,0.15f);
+    pno("detuned",   "DETUNED",   0xff70b050, 0.008f,2.0f, 2,30,  2500,0.7f,0.10f);
+    pno("jazz_p",    "JAZZ",      0xffe0a030, 0.004f,1.2f, 0, 5,  2500,0.8f,0.10f);
+    pno("bebop",     "BEBOP",     0xffd09020, 0.003f,1.0f, 0, 3,  3500,1.2f,0.00f);
+    pno("ballad",    "BALLAD",    0xffc8b040, 0.008f,2.0f, 0, 6,  2000,0.7f,0.15f);
+    pno("smoky",     "SMOKY",     0xffb8a030, 0.010f,1.8f, 1, 8,  1500,0.6f,0.20f);
+    pno("stride",    "STRIDE",    0xffd0b050, 0.003f,1.3f, 0, 4,  3000,1.0f,0.00f);
+    pno("ambient_p", "AMBIENT",   0xff60a8e0, 0.500f,5.0f, 0,12,   800,0.5f,0.20f);
+    pno("reverb_p",  "REVERB",    0xff4090d0, 0.010f,4.0f, 0, 8,  1200,0.6f,0.15f);
+    pno("space_p",   "SPACE",     0xff3080c0, 0.300f,4.5f, 0,15,   600,0.4f,0.25f);
+    pno("shimmer",   "SHIMMER",   0xff5098d8, 0.200f,3.5f, 1,10,  2000,0.7f,0.10f);
+    pno("frozen",    "FROZEN",    0xff70b0e8, 1.000f,6.0f, 0,20,   400,0.4f,0.30f);
+    pno("trap_p",    "TRAP",      0xffe06060, 0.003f,1.5f, 0, 5,  3000,1.0f,0.15f);
+    pno("drill_p",   "DRILL",     0xffd05050, 0.002f,1.2f, 0, 4,  3500,1.2f,0.10f);
+    pno("cloud_p",   "CLOUD",     0xffc07070, 0.008f,2.0f, 1, 8,  1800,0.6f,0.20f);
+    pno("opium_p",   "OPIUM",     0xffe08080, 0.005f,1.8f, 0, 6,  2000,0.7f,0.18f);
+    pno("emo_trap",  "EMOTRAP",   0xffd06060, 0.010f,2.5f, 1,10,  1500,0.5f,0.20f);
+    pno("koto",      "KOTO",      0xffe8b060, 0.002f,1.5f, 1, 3,  5000,2.0f,0.00f);
+    pno("gamelan",   "GAMELAN",   0xffd0a050, 0.001f,2.5f, 0, 2,  6000,3.0f,0.00f);
+    pno("sitar_p",   "SITAR",     0xffc09040, 0.003f,1.8f, 2,15,  4000,2.0f,0.00f);
+    pno("mbira",     "MBIRA",     0xffb08030, 0.001f,1.2f, 1, 2,  7000,2.5f,0.00f);
+    pno("santur",    "SANTUR",    0xffd0b060, 0.002f,2.0f, 1, 4,  5500,2.2f,0.00f);
+    pno("honky",     "HONKY",     0xffd4c060, 0.005f,1.0f, 0,20,  2500,0.8f,0.10f);
+    pno("rag",       "RAG",       0xffc8b040, 0.004f,1.2f, 0,15,  2800,0.9f,0.00f);
+    pno("silent_era","SILENT",    0xffb8a030, 0.003f,0.9f, 0,22,  1800,0.6f,0.00f);
+    pno("motown_p",  "MOTOWN",    0xffe0c050, 0.004f,1.5f, 0, 8,  2200,0.7f,0.15f);
+    pno("glamrock",  "GLAMROCK",  0xffd0d060, 0.003f,1.3f, 2,12,  3000,1.2f,0.10f);
+    pno("melancholy","MELA",      0xff9080e0, 0.010f,3.0f, 0, 8,  1200,0.5f,0.15f);
+    pno("hope",      "HOPE",      0xff80e090, 0.008f,2.5f, 0, 5,  2500,0.8f,0.10f);
+    pno("anger",     "ANGER",     0xffe04040, 0.002f,0.8f, 2, 6,  4000,2.0f,0.00f);
+    pno("tender",    "TENDER",    0xffe0a0b0, 0.015f,2.8f, 0, 4,  1800,0.7f,0.12f);
+    pno("nostalgia", "NOSTALGIA", 0xffc0b090, 0.012f,2.5f, 1,10,  1400,0.5f,0.18f);
+    pno("fm_grand",  "FMGRAND",   0xff40e0b0, 0.004f,2.0f, 0, 3,  4000,1.5f,0.10f);
+    pno("fm_soft",   "FMSOFT",    0xff30d0a0, 0.008f,2.5f, 0, 4,  3000,1.0f,0.10f);
+    pno("additive_p","ADDITIVE",  0xff50e8c0, 0.005f,2.2f, 0, 2,  5000,2.0f,0.10f);
+    pno("wavetbl_p", "WAVE",      0xff60f0d0, 0.006f,1.8f, 1, 6,  3500,1.5f,0.05f);
+    pno("granular_p","GRANULAR",  0xff70e8c8, 0.100f,2.5f, 2,15,  2000,0.7f,0.10f);
+    pno("rain_p",    "RAIN",      0xff70b0d0, 0.010f,3.0f, 1, 6,  2000,0.6f,0.10f);
+    pno("forest_p",  "FOREST",    0xff60a050, 0.020f,3.5f, 1,10,  1500,0.5f,0.20f);
+    pno("cave_p",    "CAVE",      0xff809070, 0.015f,4.0f, 0, 8,  1000,0.5f,0.15f);
+    pno("ocean_p",   "OCEAN",     0xff5090b0, 0.300f,5.0f, 0,15,   600,0.4f,0.30f);
+    pno("wind_p",    "WIND",      0xff80a0c0, 0.400f,4.5f, 1,20,   400,0.4f,0.20f);
+    pno("church_bel","CHURCH",    0xffd0d0a0, 0.001f,4.0f, 0, 0,  6000,3.0f,0.00f);
+    pno("crystal",   "CRYSTAL",   0xffc0e0f0, 0.001f,3.0f, 0, 0,  8000,4.0f,0.00f);
+    pno("metal_p",   "METAL",     0xffa0b0c0, 0.002f,2.0f, 2, 5,  5000,2.5f,0.00f);
+    pno("tubular",   "TUBULAR",   0xffb0c0d0, 0.001f,3.5f, 0, 1,  7000,3.5f,0.00f);
+    pno("bowl",      "BOWL",      0xffc0d0e0, 0.005f,5.0f, 0, 2,  4000,2.5f,0.10f);
+    pno("broken",    "BROKEN",    0xff808080, 0.010f,1.5f, 2,25,  1500,0.6f,0.10f);
+    pno("ghost_p",   "GHOST",     0xffb0b0b0, 0.020f,3.0f, 1,18,  1000,0.5f,0.20f);
+    pno("haunted",   "HAUNTED",   0xff909090, 0.030f,3.5f, 3,20,   800,0.4f,0.25f);
+    pno("decayed",   "DECAYED",   0xffa09090, 0.015f,2.5f, 1,22,  1200,0.5f,0.15f);
+    pno("warped",    "WARPED",    0xffb0a0a0, 0.020f,2.0f, 2,30,  1000,0.5f,0.10f);
+    pno("sine_p",    "SINE",      0xffe0e0e0, 0.005f,2.0f, 0, 0,  3000,0.8f,0.00f);
+    pno("glass_p",   "GLASS",     0xffd0e8f0, 0.003f,2.5f, 0, 2,  4000,1.2f,0.00f);
+    pno("satie",     "SATIE",     0xffd8e0f8, 0.008f,2.8f, 0, 3,  2500,0.7f,0.10f);
+    pno("arvo",      "ARVO",      0xffc8d8f0, 0.020f,4.0f, 0, 5,  2000,0.6f,0.12f);
+    pno("eno_p",     "ENO",       0xffb8c8e8, 0.300f,5.5f, 0, 8,  1500,0.5f,0.15f);
+    pno("storm",     "STORM",     0xff6070c0, 0.005f,2.0f, 2, 8,  3500,1.5f,0.15f);
+    pno("heroic",    "HEROIC",    0xff7080d0, 0.003f,1.8f, 2, 6,  4000,1.8f,0.10f);
+    pno("tragic",    "TRAGIC",    0xff5060b0, 0.010f,3.0f, 0,10,   800,0.5f,0.20f);
+    pno("epic",      "EPIC",      0xff8090e0, 0.008f,3.5f, 1,12,  1500,0.7f,0.20f);
+    pno("lullaby",   "LULLABY",   0xffa0b0e8, 0.020f,3.0f, 0, 5,  1800,0.6f,0.15f);
+
+    // ── VOICES (Legacy) ───────────────────────────────────────────────────────
+    auto vox = [&](const char* id, const char* name, uint32 col,
+                   float atk, float rel, int wave, float det, float lp, float Q, float sub=0.f){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::Legacy; p.legWave=wave; p.legDetune=det; p.legLpHz=lp; p.legLpQ=Q; p.legSubGain=sub;
+        addPreset("VOICES",p);
+    };
+    vox("nuts",     "NUTS",    0xffff80cc, 0.35f,2.2f, 0,12,1200,0.5f,0.15f);
+    vox("baritone", "BARI",    0xff8060a0, 0.10f,1.8f, 0, 5,1200,0.6f,0.25f);
+    vox("tenor",    "TENOR",   0xffa080c0, 0.08f,1.5f, 0, 8,1800,0.7f,0.10f);
+    vox("bass_vox", "BASS",    0xff604080, 0.15f,2.0f, 0, 4, 800,0.5f,0.35f);
+    vox("falsetto", "FALSETTO",0xffc0a0e0, 0.05f,1.2f, 0,10,3000,1.2f,0.00f);
+    vox("croon",    "CROON",   0xff9070b0, 0.12f,1.6f, 0, 7,1500,0.6f,0.20f);
+    vox("soprano",  "SOPRANO", 0xffffb0e0, 0.06f,1.5f, 0,12,4000,1.5f,0.00f);
+    vox("mezzo",    "MEZZO",   0xffe090c8, 0.08f,1.8f, 0,10,2800,1.0f,0.08f);
+    vox("alto_vox", "ALTO",    0xffd070b0, 0.10f,2.0f, 0, 8,2000,0.8f,0.15f);
+    vox("breathy",  "BREATHY", 0xffffd0f0, 0.04f,1.0f, 1, 6,5000,1.8f,0.00f);
+    vox("belt",     "BELT",    0xffff50a0, 0.02f,0.8f, 2, 5,4500,2.0f,0.00f);
+    vox("choir",    "CHOIR",   0xffe0c0f8, 0.30f,3.0f, 1,20,2000,0.7f,0.15f);
+    vox("gospel",   "GOSPEL",  0xfff0d060, 0.10f,2.0f, 0,15,2500,0.8f,0.20f);
+    vox("monks",    "MONKS",   0xffc0c0a0, 0.50f,4.0f, 0, 8,1000,0.5f,0.30f);
+    vox("unison",   "UNISON",  0xffd0e0f0, 0.08f,2.5f, 2,25,2000,0.7f,0.15f);
+    vox("madrigal", "MADRI",   0xffe8d0e0, 0.10f,2.2f, 1,18,2500,0.8f,0.10f);
+    vox("vocoder",  "VOCODER", 0xff40e0ff, 0.02f,0.8f, 2,10,3500,2.0f,0.00f);
+    vox("talkbox",  "TALKBOX", 0xff20d0e0, 0.01f,0.6f, 2, 8,4000,2.5f,0.00f);
+    vox("glitch_v", "GLITCH",  0xff00ffcc, 0.005f,0.4f,3,15,5000,3.0f,0.00f);
+    vox("pitch_v",  "PITCH",   0xff80ffe0, 0.03f,1.0f, 2,12,4500,2.0f,0.00f);
+    vox("formant",  "FORMANT", 0xff60d0c0, 0.04f,1.2f, 2,10,3000,3.0f,0.00f);
+    vox("trap_v",   "TRAP",    0xffff4080, 0.01f,1.5f, 2, 6,4000,2.0f,0.10f);
+    vox("rnb_v",    "RNB",     0xffe06080, 0.02f,1.8f, 0, 8,2500,1.0f,0.10f);
+    vox("pop_v",    "POP",     0xffff80b0, 0.01f,1.0f, 0, 5,5000,1.8f,0.00f);
+    vox("jazz_v",   "JAZZ",    0xffd0a040, 0.05f,1.5f, 0, 7,3000,1.0f,0.10f);
+    vox("opera_v",  "OPERA",   0xffc080e0, 0.08f,2.5f, 0,15,3500,1.2f,0.05f);
+    vox("throat",   "THROAT",  0xffa08060, 0.20f,3.0f, 1,20,1500,0.8f,0.20f);
+    vox("yodel",    "YODEL",   0xff80a060, 0.05f,0.8f, 1,25,3000,1.5f,0.00f);
+    vox("pygmy",    "PYGMY",   0xff70b070, 0.08f,1.5f, 1,18,2000,0.8f,0.10f);
+    vox("muezzin",  "MUEZZIN", 0xffd0a080, 0.10f,2.0f, 0,12,2500,0.9f,0.10f);
+    vox("siren_v",  "SIREN",   0xff80d0ff, 0.30f,3.5f, 1,20,3000,1.0f,0.10f);
+
+    // ── LEADS (mixed engines) ─────────────────────────────────────────────────
+    {
+        // SCIFI leads
+        auto scl = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float mr, float mi, float lf, float lq, float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("LEADS",p);
+        };
+        scl("bladee",  "BLADEE",  0xff80e8ff, 0.010f,1.2f, 5.0f,4.0f,2.0f,6.0f,3.0f);
+        scl("dx7_ld",  "DX7",     0xff60ff90, 0.005f,1.2f, 3.0f,5.0f,0.5f,5.0f,2.0f);
+        scl("mono_arp","ARP",     0xff80ffff, 0.005f,0.5f, 2.0f,2.0f,3.0f,4.0f,2.0f);
+        scl("seq_ld",  "SEQ",     0xffffff80, 0.010f,0.6f, 4.0f,3.0f,1.0f,5.0f,3.0f);
+        scl("ring_ld", "RING",    0xffd0e080, 0.002f,0.8f, 3.5f,8.0f,0.5f,6.0f,4.0f);
+        scl("trance",  "TRANCE",  0xff0080ff, 0.010f,1.5f, 2.5f,4.0f,0.8f,5.0f,3.0f);
+        scl("afro_ld", "AFRO",    0xffff8840, 0.005f,0.6f, 3.0f,4.0f,2.0f,5.0f,3.0f);
+
+        // SUPERSAW leads
+        auto ssl = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float det, int ns, float sat, float lp, float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("LEADS",p);
+        };
+        ssl("kencar",  "KENCAR",  0xffffe040, 0.005f,0.8f, 20,7, 3.0f,12000,2.0f);
+        ssl("hyper",   "HYPER",   0xffff00ff, 0.005f,0.8f, 22,7, 2.5f,10000,2.0f);
+        ssl("pluck_l", "PLUCK",   0xffffff00, 0.001f,0.6f, 12,5, 2.0f,12000,2.5f);
+        ssl("anthem",  "ANTHEM",  0xff00ffff, 0.020f,2.0f, 18,7, 1.5f, 6000,1.5f);
+        ssl("oberheim","OB",      0xffff4050, 0.015f,1.6f, 15,5, 1.2f, 3500,0.9f);
+
+        // GYM leads
+        auto gml = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       int w, float cl, float bh, float bd, float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=w; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("LEADS",p);
+        };
+        gml("carti",   "CARTI",   0xffff4060, 0.005f,0.6f, 1,0.9f,3000,10,0.2f);
+        gml("stab_ld", "STAB",    0xffff8000, 0.001f,0.4f, 1,0.7f,2500, 8,0.0f);
+        gml("arcade",  "ARCADE",  0xffff80ff, 0.001f,0.3f, 0,0.5f,3000, 5,0.0f);
+        gml("techno_l","TECHNO",  0xff404040, 0.005f,0.7f, 1,0.6f,1500, 6,0.0f);
+        gml("hyperpop","HPOP",    0xffff40ff, 0.001f,0.4f, 1,0.9f,2000, 8,0.1f);
+
+        // CHERNOBYL leads
+        auto chl = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       int bs, float na, float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("LEADS",p);
+        };
+        chl("suicide",  "SUICIDE",  0xff9060ff, 0.020f,1.8f,  8,0.15f,3.0f);
+        chl("noise_l",  "NOISE",    0xffaaaaaa, 0.001f,0.3f,  4,0.50f,5.0f);
+        chl("bitcr_l",  "BITCR",    0xffb0c040, 0.001f,0.5f,  8,0.05f,2.0f);
+
+        // VAPOR leads
+        auto vpl = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float det, float ls, float le, float st, float vr, int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("LEADS",p);
+        };
+        vpl("future_l","FUTURE",  0xff40ff80, 0.030f,1.5f,  8, 800,5000,0.5f,0.3f,0);
+        vpl("moog_l",  "MOOG",    0xffff9030, 0.010f,1.0f,  6, 500,3500,0.5f,0.1f,0);
+        vpl("juno_l",  "JUNO",    0xff30c0ff, 0.020f,1.5f, 18,1500,5000,0.8f,0.4f,0);
+        vpl("prophet", "PROPHET", 0xffff6030, 0.010f,1.3f, 12, 800,3500,0.6f,0.2f,0);
+        vpl("riser_l", "RISER",   0xffff0080, 2.000f,0.1f, 25, 200,8000,2.0f,0.05f,0);
+
+        // GFUNK reggaeton
+        {
+            PresetParams p; p.id="reggaeton"; p.name="REG"; p.colour=Colour(0xff30d060);
+            p.atk=0.008f; p.rel=0.8f;
+            p.engine=EngineType::GFUNK; p.detuneCents=12; p.portaDur=0.02f;
+            p.saturation=1.8f; p.legLpHz=4000; p.legLpQ=1.5f; p.legSubGain=0.2f;
+            addPreset("LEADS",p);
+        }
+        // ASTRO travis
+        {
+            PresetParams p; p.id="travis"; p.name="TRAVIS"; p.colour=Colour(0xffff8040);
+            p.atk=0.15f; p.rel=2.0f;
+            p.engine=EngineType::ASTRO; p.wobbleRate=3.0f; p.wobbleDepth=0.010f;
+            p.bitSteps=96; p.distAmount=1.2f; p.legLpHz=4000; p.legLpQ=1.2f;
+            addPreset("LEADS",p);
+        }
+    }
+
+    // ── ANIME (VAPOR + SCIFI) ─────────────────────────────────────────────────
+    {
+        auto anv = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float det, float ls, float le, float st, float vr, int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("ANIME",p);
+        };
+        auto ans = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float mr, float mi, float lf, float lq, float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("ANIME",p);
+        };
+        anv("an_epic",   "EPIC",    0xffff4488, 0.30f,2.5f, 12, 600,4000,1.5f,0.20f,0);
+        anv("an_choir",  "CHOIR",   0xffffaadd, 0.60f,3.0f,  5, 400,2000,2.0f,0.15f,2);
+        anv("an_power",  "POWER",   0xffff2266, 0.05f,1.5f,  8,1500,6000,0.8f,0.30f,0);
+        anv("an_dream",  "DREAM",   0xffcc88ff, 1.50f,4.0f,  4, 300,1200,3.0f,0.10f,2);
+        anv("an_ghost",  "GHOST",   0xffeeeeff, 0.80f,3.5f, 18, 200,1000,2.5f,0.08f,2);
+        ans("an_opening","OPENING", 0xffff8844, 0.01f,1.0f, 3.5f,3.0f,0.5f,5.0f,2.0f);
+        ans("an_battle", "BATTLE",  0xffff0044, 0.001f,0.7f,5.0f,6.0f,2.5f,8.0f,5.0f);
+        ans("an_hero",   "HERO",    0xffffcc00, 0.08f,1.2f, 2.0f,4.0f,0.8f,4.0f,3.0f);
+        ans("an_villain","VILLAIN", 0xff660033, 0.30f,2.0f, 1.5f,10.f,0.2f,3.0f,7.0f);
+        ans("an_mech",   "MECH",    0xff4488cc, 0.02f,0.8f, 7.0f,4.0f,1.5f,9.0f,4.0f);
+        ans("an_crystal","CRYSTAL", 0xffaaddff, 0.001f,2.0f,4.0f,2.0f,0.3f,5.0f,2.0f);
+        ans("an_portal", "PORTAL",  0xff8844ff, 0.10f,1.8f, 0.5f,5.0f,0.6f,4.0f,3.0f);
+        anv("an_sakura", "SAKURA",  0xffffbbcc, 1.00f,3.5f,  6, 500,2000,2.0f,0.18f,1);
+        ans("an_spirit", "SPIRIT",  0xff88ffee, 0.40f,3.0f,1.01f,15.f,0.1f,2.0f,8.0f);
+        anv("an_rise",   "RISE",    0xffff6600, 0.20f,2.5f,  9, 400,5000,1.0f,0.22f,0);
+        anv("an_wind",   "WIND",    0xffaaffcc, 0.60f,2.5f,  7, 600,2500,1.8f,0.14f,1);
+        ans("an_fire",   "FIRE",    0xffff4400, 0.05f,1.2f, 4.5f,5.0f,3.0f,7.0f,4.0f);
+        ans("an_cyber2", "CYBER",   0xff00ffcc, 0.001f,0.5f,6.0f,4.0f,2.0f,8.0f,3.0f);
+        anv("an_tears",  "TEARS",   0xff88aaff, 2.00f,5.0f,  4, 200, 900,4.0f,0.08f,2);
+    }
+
+    // ── RAP_FR (VAPOR + SCIFI + BASS808) ─────────────────────────────────────
+    {
+        auto rfv = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float det, float ls, float le, float st, float vr, int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("RAP_FR",p);
+        };
+        auto rfs = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float mr, float mi, float lf, float lq, float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("RAP_FR",p);
+        };
+        auto rf8 = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                       float sf, float sd, float da, float st, float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st; p.b8Sub=sub;
+            addPreset("RAP_FR",p);
+        };
+        rfv("rf_piano",   "PIANO MEL",  0xfff0d080, 0.002f,1.8f,  3,2000,6000,0.5f,0.10f,2);
+        rfv("rf_violin",  "VIOLIN",     0xffcc8844, 0.050f,1.2f,  3,2500,7000,0.6f,0.35f,0);
+        rfv("rf_strings", "STRINGS",    0xffaa6633, 0.300f,2.0f, 10, 800,3500,1.2f,0.25f,0);
+        rfv("rf_icy",     "ICY",        0xffaaddff, 0.500f,3.0f,  8,1200,4000,1.5f,0.15f,0);
+        rfv("rf_freeze",  "FREEZE",     0xff224488, 1.000f,4.0f, 15, 300,1200,2.5f,0.08f,2);
+        rfs("rf_sch",     "SCH",        0xff330011, 0.100f,2.0f, 1.5f,8.0f,0.15f,3.0f,5.0f);
+        rfv("rf_nekfeu",  "NEKFEU",     0xff4488cc, 0.050f,1.5f,  5,1000,3500,1.5f,0.20f,1);
+        rfs("rf_booba",   "BOOBA",      0xff222288, 0.010f,1.0f, 2.0f,6.0f,0.8f,5.0f,4.0f);
+        rfv("rf_church",  "EGLISE",     0xff888866, 0.100f,3.5f,  2,3000,8000,0.5f,0.05f,2);
+        rfv("rf_night",   "NUIT",       0xff112244, 0.800f,3.0f,  7, 400,1800,2.0f,0.12f,2);
+        rfv("rf_rain",    "PLUIE",      0xff88aacc, 1.500f,4.0f, 18, 200, 700,3.5f,0.08f,2);
+        rf8("rf_trap808", "808 FR",     0xffff3300, 0.005f,2.5f, 2.0f,0.08f,2.5f,1.0f,0.0f);
+        rf8("rf_bass_fr", "BASS FR",    0xffcc2200, 0.005f,2.0f, 1.8f,0.06f,3.0f,0.95f,0.0f);
+        rfv("rf_organ",   "ORGUE",      0xff664422, 0.020f,1.5f,  4, 500,2000,1.0f,0.40f,0);
+        rfv("rf_dark_pad","DARK PAD",   0xff1a0033, 1.000f,4.0f, 20, 150, 600,3.0f,0.05f,2);
+        rfv("rf_soul",    "SOUL",       0xff885533, 0.100f,2.0f,  6, 800,2800,1.2f,0.30f,1);
+        rfv("rf_guitar",  "GUITARE",    0xffcc8833, 0.005f,1.0f,  2,3000,7000,0.4f,0.15f,1);
+        rfv("rf_brass",   "CUIVRES",    0xffcc9900, 0.100f,1.2f,  8,1500,5000,0.5f,0.28f,0);
+        rfv("rf_drama",   "DRAMA",      0xff8800cc, 0.400f,3.0f, 12, 600,3000,1.5f,0.18f,0);
+        rfv("rf_fog",     "BROUILLARD", 0xffaabbcc, 2.000f,5.0f, 22, 150, 600,4.0f,0.06f,2);
+        rfs("rf_clock",   "HORLOGE",    0xff887755, 0.001f,1.5f, 4.0f,1.5f,0.1f,6.0f,2.0f);
+        rfv("rf_ambi",    "AMBIANCE",   0xff445566, 1.500f,4.5f, 10, 300,1500,2.5f,0.10f,0);
+        rfs("rf_jul",     "JUL",        0xffffcc00, 0.050f,1.0f, 3.0f,3.0f,1.5f,5.0f,3.0f);
+    }
+
+    // ── OCTOBER (underwater sine+sub) ─────────────────────────────────────────
+    auto oct = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                   float lp, float lq, float sub, float det){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+        addPreset("OCTOBER",p);
+    };
+    oct("oct_6am",     "6AM IN TORONTO",  0xff1a2a6c,0.10f,3.0f,  380,0.6f,0.20f,3);
+    oct("oct_marvins", "MARVINS ROOM",    0xff1a0a30,0.18f,4.0f,  320,0.5f,0.12f,5);
+    oct("oct_hold",    "HOLD ON",         0xff304060,0.14f,3.5f,  420,0.7f,0.18f,4);
+    oct("oct_passi",   "PASSION FRUIT",   0xffe08040,0.09f,2.8f,  520,0.8f,0.22f,3);
+    oct("oct_under",   "UNDERWATER",      0xff0a1a40,0.16f,4.2f,  280,0.5f,0.15f,6);
+    oct("oct_float",   "MIDNIGHT FLOAT",  0xff08080a,0.20f,4.5f,  300,0.5f,0.10f,4);
+    oct("oct_weston",  "WESTON ROAD",     0xff283868,0.10f,3.2f,  450,0.7f,0.25f,4);
+    oct("oct_softly",  "SOFTLY",          0xff8090c0,0.22f,4.8f,  260,0.4f,0.08f,5);
+    oct("oct_ovo",     "OVO KEYS",        0xffc0a000,0.08f,2.6f,  500,0.8f,0.28f,3);
+    oct("oct_fromtime","FROM TIME",       0xff6070a0,0.15f,3.8f,  350,0.6f,0.16f,4);
+    oct("oct_views",   "VIEWS SUB",       0xff203060,0.06f,2.4f,  480,0.8f,0.42f,3);
+    oct("oct_gods",    "GODS PLAN",       0xffd0a820,0.08f,2.6f,  550,0.9f,0.38f,3);
+    oct("oct_certif",  "CERTIFIED",       0xffc0c0c0,0.07f,2.4f,  580,0.9f,0.32f,4);
+    oct("oct_dark",    "DARK LANE",       0xff0a0a14,0.12f,3.4f,  340,0.6f,0.20f,5);
+    oct("oct_sneaky",  "SNEAKIN",         0xff202840,0.08f,2.8f,  410,0.7f,0.30f,4);
+    oct("oct_papi",    "PAPI PASSION",    0xff2a2060,0.07f,2.6f,  600,1.0f,0.26f,3);
+    oct("oct_summer",  "SUMMER LOVE",     0xffe0c060,0.05f,2.2f,  640,1.0f,0.22f,3);
+    oct("oct_blessed", "BLESSED",         0xffa08000,0.06f,2.4f,  620,1.0f,0.28f,4);
+    oct("oct_notice",  "NOTICE ME",       0xff3050c0,0.10f,3.0f,  460,0.8f,0.18f,4);
+    oct("oct_4422",    "LOVE YOU ALWAYS", 0xff2030a0,0.09f,3.0f,  400,0.7f,0.24f,4);
+    oct("oct_choir",   "GHOST CHOIR",     0xff4050c0,0.14f,4.0f,  360,0.6f,0.14f,9);
+    oct("oct_warm",    "WARM NIGHT",      0xffc08050,0.11f,3.2f,  490,0.8f,0.30f,6);
+    oct("oct_haze",    "TORONTO HAZE",    0xff708090,0.18f,4.0f,  320,0.5f,0.18f,7);
+    oct("oct_slow",    "SLOW DOWN",       0xff404878,0.25f,5.0f,  290,0.5f,0.10f,5);
+    oct("oct_came",    "CAME UP",         0xffd0b040,0.06f,2.2f,  560,0.9f,0.35f,3);
+
+    // ── KDOT (GFUNK West Coast) ────────────────────────────────────────────────
+    auto kd = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                  float det, float pd, float sat, float lp, float lq, float sub){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+        p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+        addPreset("KDOT",p);
+    };
+    kd("kd_compton",  "COMPTON GFUNK",  0xff8b0000,0.04f,2.0f, 14,0.0f,1.8f,2200,1.2f,0.20f);
+    kd("kd_humble",   "HUMBLE BASS",    0xff400000,0.03f,1.6f,  5,0.0f,2.2f,1600,0.9f,0.38f);
+    kd("kd_damn",     "DAMN SAW",       0xffd03000,0.02f,1.2f,  8,0.0f,3.2f,5000,2.0f,0.05f);
+    kd("kd_nottf",    "NOT LIKE US",    0xffff2000,0.01f,0.9f,  4,0.0f,4.0f,7000,2.5f,0.00f);
+    kd("kd_euphoria", "EUPHORIA LEAD",  0xffd08000,0.02f,1.2f,  6,0.0f,3.5f,4500,2.2f,0.05f);
+    kd("kd_element",  "ELEMENT",        0xffe04000,0.02f,1.3f, 20,0.0f,2.8f,3000,1.6f,0.10f);
+    kd("kd_wicked",   "WICKED",         0xff401040,0.03f,1.5f, 25,0.0f,2.0f,2000,1.2f,0.22f);
+    kd("kd_crown",    "CROWN",          0xffffd700,0.05f,2.0f, 16,0.0f,1.5f,2800,1.3f,0.14f);
+    kd("kd_alright",  "ALRIGHT",        0xff20c040,0.06f,2.2f, 18,0.0f,1.4f,2400,1.1f,0.18f);
+    kd("kd_kung",     "KUNG FU GLIDE",  0xffe09020,0.04f,1.8f, 10,0.04f,1.6f,3500,1.5f,0.12f);
+    kd("kd_count",    "COUNT ME OUT",   0xffa02020,0.03f,1.4f,  7,0.04f,2.6f,3800,1.8f,0.10f);
+    kd("kd_butterfly","BUTTERFLY KEYS", 0xff6040c0,0.14f,3.2f, 22,0.0f,0.9f,1400,0.8f,0.12f);
+    kd("kd_mortal",   "MORTAL MAN",     0xff304080,0.18f,3.5f, 28,0.0f,0.7f,1200,0.7f,0.08f);
+    kd("kd_mother",   "MOTHER I SOBER", 0xffc0a080,0.20f,4.0f, 30,0.0f,0.6f,1000,0.6f,0.06f);
+    kd("kd_sing",     "SING ABOUT ME",  0xff6080a0,0.16f,3.8f, 24,0.0f,0.8f,1500,0.8f,0.10f);
+    kd("kd_poetic",   "POETIC JUSTICE", 0xffc080e0,0.10f,2.8f, 20,0.0f,1.1f,1800,1.0f,0.18f);
+    kd("kd_vinyl",    "VINYL WEST",     0xff704020,0.08f,2.4f, 16,0.0f,2.5f,1800,0.9f,0.22f);
+    kd("kd_good",     "GOOD KID",       0xff805030,0.06f,2.2f, 12,0.0f,1.8f,2000,1.0f,0.16f);
+    kd("kd_mirror",   "MIRROR",         0xff80a0c0,0.12f,2.8f, 18,0.0f,1.2f,1700,0.9f,0.14f);
+    kd("kd_rich",     "RICH SPIRIT",    0xffe0c000,0.04f,1.8f, 10,0.0f,2.0f,2600,1.4f,0.16f);
+    kd("kd_maad",     "MAAD CITY",      0xff202020,0.03f,1.5f,  6,0.0f,2.4f,2200,1.3f,0.30f);
+    kd("kd_swim",     "SWIM LANES",     0xff004080,0.07f,2.0f, 14,0.0f,1.7f,2400,1.2f,0.26f);
+    kd("kd_duck",     "DUCKWORTH",      0xff905020,0.04f,1.7f,  9,0.0f,2.1f,2200,1.1f,0.20f);
+    kd("kd_nle",      "COMPTON NIGHTS", 0xff0a0a20,0.06f,2.2f, 15,0.0f,1.9f,2000,1.0f,0.24f);
+    kd("kd_dna",      "DNA LEAD",       0xffc04040,0.02f,1.2f,  4,0.0f,3.8f,6000,2.0f,0.08f);
+
+    // ── STARBOY (SUPERSAW 80s synthwave) ──────────────────────────────────────
+    auto sb = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                  float det, int ns, float sat, float lp, float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+        addPreset("STARBOY",p);
+    };
+    sb("sb_trilogy",  "TRILOGY SAW",    0xff202020,0.03f,1.8f,  8,3,1.2f, 6000,1.6f);
+    sb("sb_heartless","HEARTLESS",      0xff101010,0.02f,1.4f,  6,3,2.0f, 8000,2.0f);
+    sb("sb_sacrifice","SACRIFICE",      0xffff0040,0.01f,1.2f,  6,3,3.0f,12000,2.5f);
+    sb("sb_gasoline", "GASOLINE",       0xffe08000,0.02f,1.4f, 10,3,2.8f,10000,2.2f);
+    sb("sb_take",     "TAKE MY BREATH", 0xff40c0e0,0.02f,1.6f, 10,3,2.2f, 9000,1.8f);
+    sb("sb_blinding", "BLINDING LIGHTS",0xffff2060,0.02f,2.0f, 16,5,1.8f, 5000,1.5f);
+    sb("sb_dawn",     "DAWN FM",        0xffff8000,0.04f,2.2f, 14,5,1.5f, 4500,1.4f);
+    sb("sb_moth",     "MOTH TO FLAME",  0xffffff00,0.03f,1.8f, 20,5,2.0f, 6500,1.8f);
+    sb("sb_lead",     "STARBOY LEAD",   0xffffd700,0.02f,1.8f, 12,5,2.4f, 7000,2.0f);
+    sb("sb_save",     "SAVE YOUR TEARS",0xff4080c0,0.04f,2.4f, 18,5,1.6f, 4000,1.4f);
+    sb("sb_die",      "DIE FOR YOU",    0xffc00000,0.06f,2.8f, 22,5,1.4f, 3500,1.2f);
+    sb("sb_double",   "DOUBLE FANTASY", 0xffff60c0,0.04f,2.2f, 16,5,1.9f, 5000,1.5f);
+    sb("sb_xo",       "XO SERUM",       0xffe040a0,0.04f,2.4f, 20,7,2.0f, 5000,1.6f);
+    sb("sb_neon",     "NEON BLADE",     0xff00e8ff,0.03f,2.2f, 25,7,2.2f, 6500,1.8f);
+    sb("sb_cyber",    "CYBER ROMANCE",  0xff8000ff,0.08f,3.0f, 30,7,1.2f, 3500,1.1f);
+    sb("sb_kiss",     "KISS LAND",      0xff300020,0.10f,3.5f, 35,7,0.9f, 2500,0.9f);
+    sb("sb_loft",     "LOFT MUSIC",     0xff604060,0.12f,3.8f, 32,7,0.8f, 2000,0.8f);
+    sb("sb_after",    "AFTER HOURS",    0xff800020,0.07f,3.2f, 28,7,1.1f, 2800,1.0f);
+    sb("sb_belong",   "I BELONG TO YOU",0xffe080c0,0.08f,3.0f, 24,7,1.4f, 3800,1.3f);
+    sb("sb_beauty",   "BEAUTY BEHIND",  0xffc060c0,0.06f,2.8f, 22,7,1.6f, 4000,1.4f);
+    sb("sb_stargirl", "STARGIRL",       0xffa0c0ff,0.10f,3.2f, 26,7,1.0f, 3000,1.0f);
+    sb("sb_sidewalk", "SIDEWALKS",      0xff606060,0.09f,3.0f, 28,7,1.2f, 2600,0.9f);
+    sb("sb_in_good",  "IN GOOD HANDS",  0xff80e0a0,0.12f,3.4f, 30,7,1.0f, 3000,1.0f);
+    sb("sb_neon2",    "NEON ANGELS",    0xffff40ff,0.05f,2.6f, 22,7,1.8f, 4500,1.6f);
+    sb("sb_lostwaves","LOST IN WAVES",  0xffff6000,0.14f,4.0f, 35,7,0.7f, 1800,0.7f);
+
+    // ── ASTRO (distorted flute / Travis Scott) ────────────────────────────────
+    auto ast = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                   float wr, float wd, int bs, float da, float lp, float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+        addPreset("ASTRO",p);
+    };
+    ast("as_goosebumps","GOOSEBUMPS",   0xff8b4513,0.03f,2.2f,3.5f,0.012f, 96,1.4f,3500,1.4f);
+    ast("as_antidote",  "ANTIDOTE",     0xff60a000,0.04f,2.0f,4.0f,0.008f,128,1.0f,4500,1.2f);
+    ast("as_highest",   "HIGHEST",      0xffc0c000,0.06f,2.8f,2.0f,0.015f, 96,1.2f,3000,1.1f);
+    ast("as_star",      "STARGAZING",   0xff0030a0,0.10f,3.5f,1.5f,0.018f,128,0.9f,2500,1.0f);
+    ast("as_bebe",      "BEBE",         0xffff80a0,0.06f,2.4f,3.0f,0.010f, 96,1.3f,3200,1.3f);
+    ast("as_butterfly2","BUTTERFLY FX", 0xff604080,0.05f,2.4f,2.5f,0.014f, 80,1.5f,3500,1.4f);
+    ast("as_way",       "WAY BACK",     0xff4060c0,0.08f,3.0f,2.2f,0.012f, 96,1.1f,2800,1.0f);
+    ast("as_houstonia", "HOUSTONIA",    0xff804000,0.05f,2.6f,2.8f,0.010f, 80,1.4f,2600,1.1f);
+    ast("as_utopia",    "UTOPIA LEAD",  0xffe08000,0.02f,1.8f,4.5f,0.015f, 48,2.0f,5000,1.6f);
+    ast("as_night",     "NIGHTCRAWLER", 0xff200020,0.04f,2.4f,3.0f,0.018f, 48,1.8f,2800,1.3f);
+    ast("as_cactus",    "CACTUS JACK",  0xffc06000,0.02f,1.6f,5.0f,0.014f, 32,2.4f,5500,1.8f);
+    ast("as_escape",    "ESCAPE PLAN",  0xff402060,0.03f,1.8f,4.2f,0.012f, 32,2.2f,4500,1.6f);
+    ast("as_lose",      "LOSE",         0xffe04040,0.02f,1.5f,5.0f,0.010f, 24,2.6f,6000,2.0f);
+    ast("as_coords",    "COORDINATES",  0xff0080c0,0.03f,2.0f,3.8f,0.016f, 48,1.8f,4000,1.5f);
+    ast("as_portal",    "PORTAL",       0xff00c0c0,0.02f,1.6f,5.5f,0.013f, 24,2.4f,5000,1.8f);
+    ast("as_sicko",     "SICKO MODE",   0xff400000,0.03f,2.0f,2.0f,0.008f, 64,2.0f,2000,1.0f);
+    ast("as_wave",      "WAVE",         0xff0040e0,0.12f,3.5f,1.8f,0.020f,128,0.8f,2200,0.9f);
+    ast("as_moon",      "MOON PHASE",   0xffc0c0e0,0.14f,4.0f,1.2f,0.022f,128,0.7f,1800,0.8f);
+    ast("as_dream",     "DREAMLAND",    0xff8080e0,0.10f,3.2f,2.0f,0.016f, 96,1.0f,2400,0.9f);
+    ast("as_rodeo",     "RODEO",        0xffa04000,0.02f,1.2f,6.0f,0.018f, 16,3.0f,6000,2.2f);
+    ast("as_pick",      "PICK UP PHONE",0xff20c020,0.01f,1.2f,6.5f,0.010f, 12,3.2f,7000,2.5f);
+    ast("as_drugs",     "DRUGS YOU",    0xffa080c0,0.02f,1.4f,4.5f,0.020f, 20,2.8f,4500,1.8f);
+    ast("as_jackboys",  "JACKBOYS",     0xffffff00,0.01f,1.0f,7.0f,0.012f,  8,3.5f,8000,3.0f);
+    ast("as_kratos",    "KRATOS",       0xffcc0000,0.01f,1.0f,7.5f,0.008f,  6,4.0f,9000,2.8f);
+    ast("as_theme",     "ASTRO THEME",  0xffe0a000,0.04f,2.2f,3.5f,0.013f, 64,1.6f,3500,1.4f);
+
+    // ── YEEZY (3-mode soul/industrial/cathedral) ───────────────────────────────
+    auto yz = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                  int mode, float sat, float lp, float lq, float sub, float hp){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::YEEZY; p.yeezMode=mode; p.saturation=sat;
+        p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.hpHz=hp;
+        addPreset("YEEZY",p);
+    };
+    // mode 0 — soul chop
+    yz("yz_wire",    "THROUGH THE WIRE",0xffd4a017,0.05f,2.0f, 0,1.2f,4000,1.2f,0.10f,300);
+    yz("yz_dropout", "COLLEGE DROPOUT", 0xffc09020,0.06f,2.4f, 0,1.0f,3500,1.0f,0.08f,250);
+    yz("yz_diamonds","DIAMONDS",        0xffa0d0ff,0.08f,2.8f, 0,0.8f,3000,0.9f,0.06f,200);
+    yz("yz_gold",    "GOLD DIGGER",     0xffffd700,0.04f,1.8f, 0,1.4f,4500,1.4f,0.12f,350);
+    yz("yz_heard",   "HEARD EM SAY",    0xffe0c080,0.10f,3.0f, 0,0.9f,2800,0.9f,0.07f,220);
+    yz("yz_roses",   "ROSES",           0xffff80a0,0.12f,3.2f, 0,0.7f,2600,0.8f,0.05f,180);
+    yz("yz_flashing","FLASHING LIGHTS", 0xffff40ff,0.03f,1.6f, 0,1.6f,5000,1.6f,0.14f,400);
+    yz("yz_stronger","STRONGER KEYS",   0xff8080ff,0.02f,1.4f, 0,1.8f,5500,1.8f,0.15f,450);
+    // mode 1 — industrial
+    yz("yz_skinhead","BLACK SKINHEAD",  0xff1a1a1a,0.01f,0.8f, 1,5.0f,9000,3.5f,0.00f,0);
+    yz("yz_sight",   "ON SIGHT",        0xff303030,0.01f,0.7f, 1,4.5f,7000,3.0f,0.00f,0);
+    yz("yz_send",    "SEND IT UP",      0xffc01020,0.01f,0.9f, 1,4.0f,5000,2.5f,0.00f,0);
+    yz("yz_new",     "NEW SLAVES",      0xff202020,0.02f,1.2f, 1,3.0f,2500,1.8f,0.00f,0);
+    yz("yz_blood",   "BLOOD ON LEAVES", 0xff800000,0.03f,1.6f, 1,2.0f,1200,1.4f,0.10f,0);
+    yz("yz_guilt",   "GUILT TRIP",      0xff402040,0.02f,1.4f, 1,2.5f,3500,2.0f,0.00f,0);
+    yz("yz_hold",    "HOLD MY LIQUOR",  0xff501020,0.05f,2.0f, 1,1.8f, 800,1.2f,0.15f,0);
+    yz("yz_bound",   "BOUND 2",         0xff604020,0.04f,1.8f, 1,1.5f, 600,1.0f,0.20f,0);
+    // mode 2 — cathedral
+    yz("yz_moon",    "MOON KEYS",       0xffe0e8ff,0.15f,4.0f, 2,1.0f,2500,0.8f,0.30f,0);
+    yz("yz_jail",    "JAIL SUB",        0xff202040,0.08f,3.0f, 2,1.2f,2000,0.9f,0.50f,0);
+    yz("yz_carnival","CARNIVAL ORGAN",  0xffe04060,0.05f,2.2f, 2,1.5f,3000,1.1f,0.20f,0);
+    yz("yz_heaven",  "HEAVEN GATE",     0xfffffdd0,0.20f,5.0f, 2,0.6f,1800,0.7f,0.15f,0);
+    yz("yz_rumi",    "RUMI LULLABY",    0xffc0e0ff,0.18f,4.5f, 2,0.8f,2200,0.8f,0.18f,0);
+    yz("yz_donda",   "DONDA CHANT",     0xff808080,0.12f,3.5f, 2,1.1f,2400,0.9f,0.35f,0);
+    yz("yz_24",      "24",              0xffffffff,0.25f,5.5f, 2,0.5f,1600,0.7f,0.12f,0);
+    yz("yz_come",    "COME TO LIFE",    0xffffd0a0,0.14f,4.0f, 2,0.9f,2600,0.9f,0.25f,0);
+    yz("yz_believe", "I BELIEVE",       0xffd0c0e0,0.10f,3.2f, 2,1.0f,2300,0.8f,0.28f,0);
+
+    // ── GIVEON ────────────────────────────────────────────────────────────────
+    {
+        auto gvep = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                        float tr, float td, float det, float lp, float lq, float cl, float dc, float sl, float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("GIVEON",p);
+        };
+        gvep("gv_heartbreak","HEARTBREAK ANNIV",0xff2c1654,0.05f,2.5f,3.5f,0.06f, 3,1400,1.0f,0.12f,2.0f,0.25f,1.5f);
+        gvep("gv_late_keys", "LATE NIGHT KEYS", 0xff1a1030,0.07f,3.0f,1.5f,0.03f, 6,1000,1.0f,0.08f,2.5f,0.30f,2.5f);
+
+        auto gvsc = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                        float mr, float mi, float lf, float lq, float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("GIVEON",p);
+        };
+        gvsc("gv_gospel",   "GOSPEL SINE",    0xff4a2060,0.10f,3.0f,1.5f,1.0f,0.3f,2.0f,0.5f);
+        gvsc("gv_soul_bell","SOUL BELL",       0xff6040a0,0.001f,2.0f,4.0f,0.8f,0.0f,8.0f,0.0f);
+
+        auto gvvp = [&](const char* id, const char* name, uint32 col, float atk, float rel,
+                        float det, float ls, float le, float st, float vr, int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("GIVEON",p);
+        };
+        gvvp("gv_soul_pad", "SOUL PAD",        0xff1a0a30,0.30f,3.5f, 8, 400,2000,2.5f,0.20f,2);
+        gvvp("gv_cine_dread","CINEMATIC DREAD", 0xff100820,0.80f,4.5f,20, 200,1000,4.0f,0.10f,0);
+
+        auto gvoct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("GIVEON",p);
+        };
+        gvoct("gv_deep_muff","DEEP MUFFLED",  0xff0a0520,0.12f,3.8f,350,0.6f,0.40f,5);
+        gvoct("gv_4am",      "4AM CONFESSION",0xff08040f,0.18f,4.5f,280,0.5f,0.15f,7);
+
+        auto gvsam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("GIVEON",p);
+        };
+        gvsam("gv_soul_pluck","SOUL PLUCK",   0xff3a1540,0.01f,2.0f,0.8f, 6,0.30f);
+        gvsam("gv_resonant",  "RESONANT SOUL",0xff5030a0,0.001f,2.5f,1.5f,12,0.15f);
+
+        auto gvvk=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float sub,float lp,float sat,int w){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VIKINGS; p.detuneCents=det; p.subGain=sub; p.vikLpHz=lp; p.saturation=sat; p.waves=w;
+            addPreset("GIVEON",p);
+        };
+        gvvk("gv_dark_choir","DARK CHOIR",    0xff2a1060,0.25f,3.2f,12,0.20f,1200,1.0f,3);
+
+        auto gvhr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("GIVEON",p);
+        };
+        gvhr("gv_drift_silk","DRIFT SILK",    0xff201030,0.40f,4.0f,1.005f,0.003f,64,2000,1.2f);
+
+        auto gvgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("GIVEON",p);
+        };
+        gvgf("gv_neo_lead","NEO SOUL LEAD",   0xff5a2080,0.05f,2.0f,18,0.0f,0.8f,2500,1.0f,0.20f);
+
+        auto gvpt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("GIVEON",p);
+        };
+        gvpt("gv_neo_str","NEO STRINGS",      0xff4030a0,0.20f,2.8f,15,3.5f,0.007f,1.5f);
+
+        auto gvgt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("GIVEON",p);
+        };
+        gvgt("gv_strum","SOULFUL STRUM",      0xff2a1020,0.01f,1.8f,0,3500,800,0.2f,1.5f,1.1f,5,0.4f,0.0f);
+
+        auto gvtrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float dc,float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.atk=atk; p.formantHz=fhz; p.punch=pch;
+            addPreset("GIVEON",p);
+        };
+        gvtrib("gv_formant","SOUL FORMANT",   0xff3a2060,0.08f,1.5f,0.5f,500,2.5f);
+
+        auto gvchrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("GIVEON",p);
+        };
+        gvchrn("gv_vinyl_soul","VINYL SOUL",  0xff4a2840,0.08f,2.2f,32,0.04f,1.5f);
+
+        auto gvgym=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wv,float cl,float bh,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=wv; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("GIVEON",p);
+        };
+        gvgym("gv_dark_punch","DARK PUNCH",   0xff281040,0.02f,1.4f,0,0.3f,600,4,0.30f);
+
+        auto gvast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("GIVEON",p);
+        };
+        gvast("gv_smooth","SMOOTH LIKE",      0xff2a1858,0.06f,2.4f,1.2f,0.006f,128,0.8f,2200,0.9f);
+
+        auto gvss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("GIVEON",p);
+        };
+        gvss("gv_orch_dark","ORCHESTRAL DARK",0xff1a0840,0.35f,3.5f,28,7,0.5f,1800,0.7f);
+        gvss("gv_lush_wall","LUSH DARK WALL", 0xff150a30,0.40f,4.0f,35,7,0.4f,1500,0.6f);
+
+        gvoct("gv_cathedral","CATHEDRAL",     0xffe8d0ff,0.20f,5.0f,2000,0.8f,0.20f,0);
+
+        auto gvb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("GIVEON",p);
+        };
+        gvb8("gv_like_you","LIKE I WANT YOU", 0xff180830,0.04f,2.2f,1.0f,0.001f,1.0f,1.0f);
+        gvb8("gv_warmth808","WARMTH",          0xff3a1a50,0.04f,2.0f,1.5f,0.08f,1.5f,1.0f);
+
+        auto gvbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("GIVEON",p);
+        };
+        gvbag("gv_dark_organ","DARK ORGAN",   0xff3c2060,0.06f,2.5f,0.45f,0.15f,120,2.5f,0.003f,1800,1.0f);
+    }
+
+    // ── DAMSO ─────────────────────────────────────────────────────────────────
+    {
+        auto dmhr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("DAMSO",p);
+        };
+        dmhr("dm_ipseit",  "IPSEITE",         0xff1a1a2e,0.01f,1.8f,1.02f,0.04f, 8,1200,3.0f);
+        dmhr("dm_extreme", "EXTREME",         0xff0a0204,0.01f,1.0f,1.04f,0.06f, 4, 600,5.0f);
+        dmhr("dm_fm_sub",  "FM SOUS-GRAVE",   0xff04040c,0.04f,2.0f,0.5f, 0.10f, 96,2000,4.0f);
+
+        auto dmb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("DAMSO",p);
+        };
+        dmb8("dm_808dark","BATTERIE FAIBLE",  0xff0d0d1a,0.02f,1.4f,3.0f,0.12f,4.0f,1.0f);
+
+        auto dmgym=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wv,float cl,float bh,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=wv; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("DAMSO",p);
+        };
+        dmgym("dm_industrial","PACIFIQUE",    0xff2a0a0a,0.01f,1.0f,0,0.9f,3000,10,0.0f);
+        dmgym("dm_square_ind","CARRE INDUS",  0xff1a1008,0.01f,1.1f,1,0.5f,1000, 8,0.0f);
+
+        auto dmchrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("DAMSO",p);
+        };
+        dmchrn("dm_noise",  "BRUIT BLANC",   0xff080808,0.01f,1.2f, 4,0.35f,5.0f);
+        dmchrn("dm_noise2", "CHAOS BLANC",   0xff080408,0.01f,1.4f,20,0.50f,2.0f);
+
+        auto dmsc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float mi,float lf,float lq,float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("DAMSO",p);
+        };
+        dmsc("dm_fm_cold","FM FROID",         0xff0a1020,0.03f,2.0f,7.0f,8.0f,0.05f,8.0f,0.5f);
+
+        dmgym("dm_ind_square2","BLACK MIRROR",0xff1a1a1a,0.01f,0.9f,1,0.9f,1800, 8,0.0f);
+        // reuse YEEZY mode1 via raw preset
+        {
+            PresetParams p; p.id="dm_ind_sq"; p.name="BLACK MIRROR"; p.colour=Colour(0xff1a1a1a);
+            p.atk=0.01f; p.rel=0.9f;
+            p.engine=EngineType::YEEZY; p.yeezMode=1; p.saturation=5.0f;
+            p.legLpHz=9000; p.legLpQ=3.5f; p.legSubGain=0.0f; p.hpHz=0;
+            addPreset("DAMSO",p);
+        }
+
+        auto dmast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("DAMSO",p);
+        };
+        dmast("dm_glitch","GLITCH PSYCHO",    0xff1a0a2a,0.02f,1.5f,5.5f,0.020f, 8,3.5f,2500,2.0f);
+
+        auto dmvk=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float sub,float lp,float sat,int w){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VIKINGS; p.detuneCents=det; p.subGain=sub; p.vikLpHz=lp; p.saturation=sat; p.waves=w;
+            addPreset("DAMSO",p);
+        };
+        dmvk("dm_cold_saws","SCIE FROIDE",    0xff0a0a14,0.03f,1.8f, 4,0.50f, 500,4.0f,3);
+
+        auto dmvp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float ls,float le,float st,float vr,int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("DAMSO",p);
+        };
+        dmvp("dm_dark_sweep","DESCENTE",      0xff10101a,0.05f,2.2f,25, 150, 600,0.4f,0.05f,0);
+        dmvp("dm_sub_sweep", "VAGUE GRAVE",   0xff060610,0.08f,2.5f, 0,  80, 400,0.8f,0.00f,2);
+
+        auto dmtrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.formantHz=fhz; p.punch=pch;
+            addPreset("DAMSO",p);
+        };
+        dmtrib("dm_punch_dark","PERCUSSION",  0xff0f0f0f,0.01f,0.8f,350,7.0f);
+        dmtrib("dm_max_punch", "IMPACT MAX",  0xff0f0808,0.001f,0.6f,200,10.0f);
+
+        auto dmsam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("DAMSO",p);
+        };
+        dmsam("dm_short_plk","PLUCK SEC",     0xff14141e,0.001f,1.0f,0.08f,14,0.05f);
+
+        auto dmpt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("DAMSO",p);
+        };
+        dmpt("dm_slow_vib","VIBRATION BASSE", 0xff0a0a10,0.06f,2.5f, 5,0.3f,0.030f,6.0f);
+
+        auto dmgt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("DAMSO",p);
+        };
+        dmgt("dm_dark_pluck","CORDE NOIRE",   0xff180808,0.001f,1.2f,0, 600,150,0.05f,4.0f,4.0f,0,0.08f,0.0f);
+
+        auto dmbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("DAMSO",p);
+        };
+        dmbag("dm_drone","BOURDON NOIR",      0xff050508,0.04f,3.0f,0.07f,0.80f,500,0.0f,0.0f,800,5.0f);
+
+        auto dmgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("DAMSO",p);
+        };
+        dmgf("dm_cold_bass","BASSE FROIDE",   0xff0a0a18,0.02f,1.6f, 3,0.0f,5.0f, 600,2.0f,0.0f);
+
+        auto dmoct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("DAMSO",p);
+        };
+        dmoct("dm_cave",    "CAVE",           0xff04040a,0.15f,3.5f,220,0.4f,0.08f,2);
+
+        auto dmss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("DAMSO",p);
+        };
+        dmss("dm_3saws","TROIS SAWS FROIDS",  0xff0c0c20,0.03f,1.8f, 6,3,4.0f,1800,2.5f);
+
+        auto dmep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("DAMSO",p);
+        };
+        dmep("dm_dark_ep","EP NOIR",          0xff10080a,0.04f,1.8f,0.0f,0.0f, 2, 800,1.5f,0.0f,0.8f,0.10f,4.0f);
+
+        {
+            PresetParams p; p.id="dm_yeezy_cave"; p.name="YEEZY CAVE"; p.colour=Colour(0xff050510);
+            p.atk=0.12f; p.rel=3.2f;
+            p.engine=EngineType::YEEZY; p.yeezMode=2; p.saturation=2.0f;
+            p.legLpHz=600; p.legLpQ=0.8f; p.legSubGain=0.50f; p.hpHz=0;
+            addPreset("DAMSO",p);
+        }
+    }
+
+    // ── CAS ───────────────────────────────────────────────────────────────────
+    {
+        auto casvp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float ls,float le,float st,float vr,int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("CAS",p);
+        };
+        casvp("ca_dream_sw","DREAM SWEEP",    0xffc8a0f0,0.30f,4.0f, 8, 300,4000,2.5f,0.15f,2);
+        casvp("ca_float_sw","FLOATING SWEEP", 0xffc8d8f8,0.50f,5.0f, 5, 500,5000,3.5f,0.08f,1);
+        casvp("ca_warm_sw", "WARM SWEEP",     0xffc88830,0.20f,2.6f, 6, 800,6000,0.8f,0.20f,1);
+
+        auto casss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("CAS",p);
+        };
+        casss("ca_shoegaze","SHOEGAZE WALL",  0xffb060c0,0.40f,4.5f,32,7,0.4f,2000,0.7f);
+        casss("ca_thin_shine","THIN SHIMMER", 0xfff0f0ff,0.04f,2.0f,10,3,0.3f,9000,1.0f);
+        casss("ca_wide_dream","WIDE DREAM",   0xffb0a0d0,0.35f,4.5f,30,2,0.4f,2200,0.9f);
+        casss("ca_gentle_pad","GENTLE PAD",   0xffb8a8d8,0.40f,4.2f,22,3,0.5f,1800,0.8f);
+
+        auto cassc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float mr,float mi,float lf,float lq,float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("CAS",p);
+        };
+        cassc("ca_fm_ether","FM ETHERE",      0xffe0c0ff,0.10f,3.0f,1.0f,0.5f,0.2f,3.0f,0.3f);
+        cassc("ca_fm_fast", "FM SCINTILLANT", 0xffe8d0ff,0.05f,2.5f,3.0f,0.4f,5.0f,6.0f,1.0f);
+
+        auto casoct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("CAS",p);
+        };
+        casoct("ca_intimate","CHAMBRE ROSE",  0xfff0a0b8,0.12f,3.8f,480,0.7f,0.12f,5);
+        casoct("ca_open_oct","OPEN DREAM",    0xffffd8f0,0.10f,3.5f,600,0.8f,0.18f,4);
+
+        auto cassam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("CAS",p);
+        };
+        cassam("ca_soft_pluck","SOFT PLUCK",  0xffc0a0d8,0.001f,2.5f,0.6f, 5,0.20f);
+        cassam("ca_long_pluck","PLUCK ETERNEL",0xfff0e8ff,0.001f,3.5f,2.0f, 8,0.22f);
+
+        auto casep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("CAS",p);
+        };
+        casep("ca_ep_dream","EP REVE",         0xfff8c0e0,0.06f,3.0f,2.0f,0.04f, 5,1600,1.0f,0.06f,2.0f,0.28f,1.4f);
+        casep("ca_ep_church","EP EGLISE",      0xffe8e0ff,0.08f,4.0f,0.8f,0.02f, 4,1200,0.9f,0.04f,3.0f,0.35f,1.2f);
+
+        auto casgt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("CAS",p);
+        };
+        casgt("ca_pluck_clean","PLUCK CRISTAL",0xffd8e8f8,0.001f,2.0f,0,6000,2000,0.3f,1.0f,0.8f,3,0.3f,0.0f);
+
+        auto casgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("CAS",p);
+        };
+        casgf("ca_soft_warm","ANALOG VELVET",  0xffe8c0d8,0.05f,2.5f,20,0.0f,0.6f,3000,0.9f,0.10f);
+
+        auto caschrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                         int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("CAS",p);
+        };
+        caschrn("ca_dust",  "POUSSIERE",       0xffe0d8f0,0.10f,3.5f,96,0.02f,0.8f);
+
+        auto cashr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("CAS",p);
+        };
+        cashr("ca_drift",   "DRIFT NOCTURNE",  0xffa0a8c8,0.50f,4.5f,1.003f,0.002f,96,2500,1.0f);
+
+        auto caspt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("CAS",p);
+        };
+        caspt("ca_str_vib","STRING VIBRATO",   0xffd080e0,0.20f,3.5f,12,3.8f,0.008f,1.2f);
+        caspt("ca_fast_vib","VIBRATO RAPIDE",  0xffd8c0f8,0.15f,3.0f, 8,7.0f,0.012f,0.9f);
+
+        auto castrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                         float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.formantHz=fhz; p.punch=pch;
+            addPreset("CAS",p);
+        };
+        castrib("ca_soft_bell","BELL FLORAL",  0xfff0c8e8,0.001f,2.2f,1200,1.2f);
+
+        auto casbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("CAS",p);
+        };
+        casbag("ca_drone","AMBIENT DRONE",     0xffa0c0e0,0.06f,4.0f,0.48f,0.40f,160,2.0f,0.004f,2500,0.9f);
+
+        auto casb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("CAS",p);
+        };
+        casb8("ca_sub_clean","BASS FLORALE",   0xffc0d0e8,0.05f,2.0f,1.0f,0.001f,0.5f,1.0f);
+
+        auto casast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("CAS",p);
+        };
+        casast("ca_wobble_cl","FLUTE REVEUSE", 0xffe8f0d8,0.06f,2.8f,1.5f,0.008f,128,0.6f,3000,1.0f);
+
+        {
+            PresetParams p; p.id="ca_divine"; p.name="DIVINE LIGHT"; p.colour=Colour(0xfffff8ff);
+            p.atk=0.18f; p.rel=4.8f;
+            p.engine=EngineType::YEEZY; p.yeezMode=2; p.saturation=0.5f;
+            p.legLpHz=3500; p.legLpQ=0.7f; p.legSubGain=0.08f; p.hpHz=0;
+            addPreset("CAS",p);
+        }
+    }
+
+    // ── TORY ──────────────────────────────────────────────────────────────────
+    {
+        auto togf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("TORY",p);
+        };
+        togf("to_carib_lead","CARIBBEAN LEAD",0xffe8a030,0.04f,2.0f,14,0.0f,1.6f,4000,1.4f,0.18f);
+        togf("to_saw_warm",  "SAW WARM",      0xffb07020,0.04f,2.0f,22,0.0f,1.0f,3500,1.0f,0.14f);
+
+        auto tob8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("TORY",p);
+        };
+        tob8("to_808warm",  "WARM 808",       0xffc86000,0.02f,1.8f,1.5f,0.06f,1.8f,1.0f);
+        tob8("to_808slide", "808 SLIDE LONG", 0xffd05010,0.02f,1.5f,2.5f,0.18f,2.5f,1.0f);
+
+        auto toep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("TORY",p);
+        };
+        toep("to_rb_ep",  "R&B EP",           0xfff0c060,0.04f,2.2f,4.5f,0.07f, 5,2500,1.2f,0.14f,1.2f,0.22f,1.6f);
+        toep("to_ep_fast","EP FESTIF",         0xffe8b020,0.04f,1.8f,6.0f,0.09f, 4,3000,1.3f,0.18f,1.0f,0.18f,1.2f);
+
+        auto tovp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float ls,float le,float st,float vr,int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("TORY",p);
+        };
+        tovp("to_trop_pad","TROPICAL PAD",    0xffe89020,0.25f,3.2f,10, 600,5000,1.2f,0.25f,0);
+        tovp("to_warm_sw", "WARM SWEEP",      0xffc88830,0.20f,2.6f, 6, 800,6000,0.8f,0.20f,1);
+
+        auto toss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("TORY",p);
+        };
+        toss("to_warm_ssaw","WARM SUPERSAW",  0xffd07020,0.05f,2.5f,18,5,1.6f, 6000,1.5f);
+        toss("to_bright_wall","BRIGHT WALL",  0xfff0c840,0.05f,2.8f,22,7,1.8f, 8000,1.6f);
+        toss("namek",       "NAMEK",          0xffffd700,0.05f,3.0f,20,7,2.8f,10000,2.0f);
+
+        auto togym=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wv,float cl,float bh,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=wv; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("TORY",p);
+        };
+        togym("to_dancehall","DANCEHALL STAB",0xffff8020,0.01f,1.0f,1,0.5f,2000,6,0.15f);
+        togym("to_clip_saw", "CLIP SAW DANCE",0xffe86020,0.02f,1.4f,0,0.4f,1500,5,0.10f);
+
+        auto tosc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float mi,float lf,float lq,float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("TORY",p);
+        };
+        tosc("to_fm_bright","FM BRIGHT",      0xfff0b840,0.03f,1.8f,2.0f,2.5f,0.6f,4.0f,1.5f);
+
+        auto tosam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("TORY",p);
+        };
+        tosam("to_carib_pluck","MARIMBA CARIB",0xffe8c040,0.001f,1.4f,0.25f,8,0.40f);
+
+        auto togt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("TORY",p);
+        };
+        togt("to_warm_gtr","WARM GUITAR",     0xffd08030,0.001f,1.6f,0,4000,1500,0.15f,1.8f,1.2f,4,0.3f,0.0f);
+
+        auto totrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.formantHz=fhz; p.punch=pch;
+            addPreset("TORY",p);
+        };
+        totrib("to_carib_perc","CARIB PERC",  0xffe07020,0.01f,1.0f, 700,3.5f);
+
+        auto tovk=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float sub,float lp,float sat,int w){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VIKINGS; p.detuneCents=det; p.subGain=sub; p.vikLpHz=lp; p.saturation=sat; p.waves=w;
+            addPreset("TORY",p);
+        };
+        tovk("to_warm_ens","WARM ENSEMBLE",   0xffc07828,0.20f,2.8f,12,0.25f,3000,1.2f,3);
+
+        auto tohr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("TORY",p);
+        };
+        tohr("to_vintage","VINTAGE TAPE",     0xffa06020,0.06f,2.4f,1.008f,0.005f,48,3000,1.0f);
+
+        auto tochrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("TORY",p);
+        };
+        tochrn("to_grit_rb","GRIT R&B",       0xffb05818,0.04f,1.8f,48,0.06f,2.0f);
+
+        auto toast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("TORY",p);
+        };
+        toast("to_trap_wob","TRAP WOBBLE",    0xffe04010,0.03f,1.6f,3.5f,0.012f,64,1.6f,4000,1.4f);
+
+        auto topt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("TORY",p);
+        };
+        topt("to_carib_vib","CARIB STRINGS",  0xffd09030,0.15f,2.5f,18,5.0f,0.010f,1.8f);
+
+        auto tooct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("TORY",p);
+        };
+        tooct("to_intimate","INTIMATE R&B",   0xffc07040,0.10f,3.0f,560,0.9f,0.28f,4);
+
+        auto tobag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("TORY",p);
+        };
+        tobag("to_steel_drum","STEEL DRUM",   0xfff0d060,0.001f,1.2f,0.50f,0.05f,80,0.0f,0.0f,6000,4.0f);
+
+        {
+            PresetParams p; p.id="to_soul_chop"; p.name="SOUL CHOP CARIB"; p.colour=Colour(0xfff0a840);
+            p.atk=0.04f; p.rel=1.8f;
+            p.engine=EngineType::YEEZY; p.yeezMode=0; p.saturation=1.4f;
+            p.legLpHz=4500; p.legLpQ=1.3f; p.legSubGain=0.15f; p.hpHz=280;
+            addPreset("TORY",p);
+        }
+    }
+
+    // ── RNB ───────────────────────────────────────────────────────────────────
+    {
+        auto rnbep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("RNB",p);
+        };
+        rnbep("rnb_neosoul","NEO SOUL RHODES",0xffc47028,0.04f,3.0f,2.8f,0.06f, 6,2800,1.1f,0.12f,1.8f,0.25f,2.2f);
+        rnbep("rnb_gospel_ep","GOSPEL RHODES",0xffe09040,0.03f,2.6f,5.5f,0.10f, 3,3500,1.0f,0.20f,1.2f,0.30f,1.5f);
+        rnbep("rnb_warm_ep3","WARM EP LATE",  0xffd8901c,0.05f,2.8f,3.5f,0.05f, 8,2200,0.9f,0.08f,2.2f,0.28f,2.8f);
+
+        auto rnboct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("RNB",p);
+        };
+        rnboct("rnb_motown","MOTOWN SINE",    0xffa06830,0.06f,2.8f,480,0.8f,0.22f,3);
+        rnboct("rnb_intimate","INTIMATE SINE",0xffa09070,0.15f,3.5f,640,1.0f,0.18f,2);
+
+        auto rnbvp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float ls,float le,float st,float vr,int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("RNB",p);
+        };
+        rnbvp("rnb_sza_pad","SZA DREAM PAD", 0xffd080c0,0.30f,4.0f, 8, 500,4000,2.0f,0.15f,0);
+        rnbvp("rnb_slow_jam","SLOW JAM PAD", 0xffd060a0,0.40f,4.5f, 5, 400,3000,3.0f,0.08f,1);
+
+        auto rnbsc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float mr,float mi,float lf,float lq,float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("RNB",p);
+        };
+        rnbsc("rnb_fm_bell","SOUL FM BELL",   0xfff0a040,0.02f,2.2f,1.5f,1.8f,0.4f,3.5f,0.8f);
+        rnbsc("rnb_fm_elec","ELECTRIC SOUL",  0xffe0a020,0.02f,1.6f,3.0f,3.5f,1.0f,5.0f,2.0f);
+
+        auto rnbbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("RNB",p);
+        };
+        rnbbag("rnb_smooth_jazz","SMOOTH JAZZ",0xff8090b0,0.12f,2.5f,0.18f,0.0f,200,4.5f,0.007f,2800,2.5f);
+
+        auto rnbgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("RNB",p);
+        };
+        rnbgf("rnb_funk_lead","FUNK LEAD",    0xffd09830,0.02f,1.4f,10,0.0f,1.4f,3800,1.2f,0.12f);
+        rnbgf("rnb_mellow_saw","MELLOW SAW",  0xffc07830,0.10f,2.8f,18,0.0f,0.9f,2400,0.9f,0.20f);
+
+        auto rnbvk=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float sub,float lp,float sat,int w){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VIKINGS; p.detuneCents=det; p.subGain=sub; p.vikLpHz=lp; p.saturation=sat; p.waves=w;
+            addPreset("RNB",p);
+        };
+        rnbvk("rnb_choir","SILKY CHOIR",      0xffe0c0a0,0.22f,3.5f, 9,0.12f,3200,1.0f,5);
+
+        auto rnbb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("RNB",p);
+        };
+        rnbb8("rnb_round_bass","ROUND BASS",  0xff804020,0.02f,2.0f,1.0f,0.02f,1.4f,1.0f);
+        rnbb8("rnb_deep_bass", "DEEP R&B",    0xff602010,0.02f,2.2f,1.2f,0.05f,2.0f,1.0f);
+
+        auto rnbsam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("RNB",p);
+        };
+        rnbsam("rnb_soul_pluck","SOUL PLUCK", 0xffc09060,0.001f,1.8f,0.30f,6,0.35f);
+
+        auto rnbhr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("RNB",p);
+        };
+        rnbhr("rnb_vinyl","VINYL SOUL",        0xff706050,0.08f,2.8f,1.004f,0.003f,56,2800,0.9f);
+
+        auto rnbast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("RNB",p);
+        };
+        rnbast("rnb_trap_rb","R&B TRAP LEAD", 0xffb040a0,0.03f,1.8f,2.5f,0.008f,96,1.5f,4500,1.2f);
+
+        auto rnbgym=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        int wv,float cl,float bh,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=wv; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("RNB",p);
+        };
+        rnbgym("rnb_organ_stab","CHURCH STAB",0xffa05000,0.01f,0.9f,1,0.35f,1200,5,0.10f);
+
+        auto rnbchrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                         int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("RNB",p);
+        };
+        rnbchrn("rnb_lofi","LO-FI SOUL",      0xff907060,0.06f,2.4f,36,0.08f,1.6f);
+
+        auto rnbpt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("RNB",p);
+        };
+        rnbpt("rnb_strings_vib","SOUL STRINGS",0xffd0a080,0.18f,3.2f,12,4.2f,0.009f,1.5f);
+
+        auto rnbtrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                         float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.formantHz=fhz; p.punch=pch;
+            addPreset("RNB",p);
+        };
+        rnbtrib("rnb_click_perc","SOUL CLICK", 0xffc08040,0.01f,0.8f, 600,3.0f);
+
+        auto rnbgt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("RNB",p);
+        };
+        rnbgt("rnb_fingerpick","FINGER GUITAR",0xffb07030,0.001f,2.0f,0,3500, 900,0.20f,1.6f,1.0f,3,0.35f,0.0f);
+
+        auto rnbss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("RNB",p);
+        };
+        rnbss("rnb_gospel_wall","GOSPEL WALL", 0xfff0c060,0.08f,3.0f,14,5,1.4f,5500,1.3f);
+
+        {
+            PresetParams p; p.id="rnb_soul_chop"; p.name="SOUL CHOP"; p.colour=Colour(0xffe08828);
+            p.atk=0.03f; p.rel=1.5f;
+            p.engine=EngineType::YEEZY; p.yeezMode=0; p.saturation=1.2f;
+            p.legLpHz=3800; p.legLpQ=1.1f; p.legSubGain=0.12f; p.hpHz=200;
+            addPreset("RNB",p);
+        }
+    }
+
+    // ── PHONK_BR ──────────────────────────────────────────────────────────────
+    {
+        auto pbgym=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       int wv,float cl,float bh,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GYM; p.gymWave=wv; p.clipAmount=cl; p.boostHz=bh; p.boostDB=bd; p.gymSub=sub;
+            addPreset("PHONK_BR",p);
+        };
+        pbgym("pb_funk_clip","FUNK CARIOCA",  0xff22bb44,0.01f,0.8f,1,0.85f,2500,10,0.25f);
+        pbgym("pb_pisadinha","PISADINHA ELEC",0xff11aa33,0.01f,0.6f,0,0.70f,3000, 9,0.18f);
+        pbgym("pb_bounce_clip","BOUNCE CLIP", 0xff55cc44,0.01f,0.7f,1,0.90f,1800,12,0.30f);
+
+        auto pbb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float sf,float sd,float da,float st){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=da; p.slideTarget=st;
+            addPreset("PHONK_BR",p);
+        };
+        pbb8("pb_808_baile","BAILE 808",      0xff119933,0.01f,1.5f,2.0f,0.10f,3.5f,1.0f);
+        pbb8("pb_808_heavy","808 PESADO",     0xff006616,0.01f,2.0f,3.0f,0.15f,4.5f,1.0f);
+
+        auto pbyr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      int mode,float sat,float lp,float lq,float sub,float hp){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::YEEZY; p.yeezMode=mode; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.hpHz=hp;
+            addPreset("PHONK_BR",p);
+        };
+        pbyr("pb_tamborzao","TAMBORZAO ELEC", 0xff33cc55,0.01f,0.7f,1,4.5f,7000,2.5f,0.0f,600);
+
+        auto pbtrib=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        float fhz,float pch){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::TRIBAL; p.formantHz=fhz; p.punch=pch;
+            addPreset("PHONK_BR",p);
+        };
+        pbtrib("pb_perc150","PERCUSSAO 150",  0xff44dd44,0.01f,0.5f,1200,6.0f);
+        pbtrib("pb_forro_perc","FORRO PERC",  0xff22aa33,0.01f,0.6f, 900,7.0f);
+
+        auto pbchrn=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                        int bs,float na,float sat){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::CHERNOBYL; p.bitSteps=bs; p.noiseAmt=na; p.saturation=sat;
+            addPreset("PHONK_BR",p);
+        };
+        pbchrn("pb_bass_sat","BASS SATURADA", 0xff0a8822,0.01f,1.2f,12,0.20f,4.0f);
+        pbchrn("pb_crado_vinyl","VINIL CRADO",0xff337744,0.05f,1.6f, 6,0.30f,5.0f);
+
+        auto pbhr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float dr,int bs,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::HORROR; p.horModRatio=mr; p.driftAmount=dr; p.bitSteps=bs; p.horLpHz=lp; p.horLpQ=lq;
+            addPreset("PHONK_BR",p);
+        };
+        pbhr("pb_horror_synth","SINTETIZADOR",0xff226633,0.03f,1.4f,1.025f,0.04f, 8,4500,3.5f);
+        pbhr("pb_industrial","INDUSTRIAL",    0xff334433,0.03f,1.5f,1.050f,0.08f, 5,5000,4.0f);
+
+        auto pbast=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float wr,float wd,int bs,float da,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd; p.bitSteps=bs; p.distAmount=da; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("PHONK_BR",p);
+        };
+        pbast("pb_mc_wobble","MC ENERGY",     0xff55ee66,0.02f,1.0f,8.0f,0.022f,16,3.0f,6000,2.5f);
+        pbast("pb_wobble_bass","WOBBLE BASS", 0xff00ff44,0.02f,1.6f,5.0f,0.018f,24,2.5f,3500,2.0f);
+
+        auto pbsc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float mr,float mi,float lf,float lq,float ld){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi; p.lfoFreq=lf; p.lpQ=lq; p.lfoDepth=ld;
+            addPreset("PHONK_BR",p);
+        };
+        pbsc("pb_forro_fm","FORRO PHONK FM",  0xff33cc44,0.02f,1.1f,4.5f,7.0f,2.0f,6.0f,5.0f);
+
+        auto pbvk=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float sub,float lp,float sat,int w){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VIKINGS; p.detuneCents=det; p.subGain=sub; p.vikLpHz=lp; p.saturation=sat; p.waves=w;
+            addPreset("PHONK_BR",p);
+        };
+        pbvk("pb_vikings_wall","PAREDE SAT",  0xff1a7730,0.03f,1.8f,20,0.40f,5000,4.5f,3);
+
+        auto pbvp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float ls,float le,float st,float vr,int wt){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::VAPOR; p.detuneCents=det; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st; p.vapVibRate=vr; p.vapWave=wt;
+            addPreset("PHONK_BR",p);
+        };
+        pbvp("pb_sweep_agro","SWEEP AGRESSIF",0xff22dd55,0.02f,1.5f,22,1500,9000,0.4f,1.0f,0);
+
+        auto pbsam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pd,float res,float hm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.lpQ=res; p.harmMix=hm;
+            addPreset("PHONK_BR",p);
+        };
+        pbsam("pb_pluck_hard","PLUCK DURO",   0xff33bb44,0.001f,0.7f,0.10f,15,0.50f);
+
+        auto pbss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,int ns,float sat,float lp,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::SUPERSAW; p.detuneCents=det; p.numSaws=ns; p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+            addPreset("PHONK_BR",p);
+        };
+        pbss("pb_phonk_wall","PHONK WALL",    0xff55ff66,0.04f,2.0f,30,7,4.0f,9000,2.5f);
+
+        auto pbgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float pd,float sat,float lp,float lq,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GFUNK; p.detuneCents=det; p.portaDur=pd; p.saturation=sat;
+            p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+            addPreset("PHONK_BR",p);
+        };
+        pbgf("pb_phonk_horn","PHONK HORN",    0xff44ee55,0.02f,1.2f,28,0.0f,3.0f,6000,2.0f,0.25f);
+
+        auto pbpt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float det,float vr,float vd,float lq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::PIRATES; p.detuneCents=det; p.vibRate=vr; p.vibDepth=vd; p.lpQ=lq;
+            addPreset("PHONK_BR",p);
+        };
+        pbpt("pb_string_stab","STRING STAB",  0xff00cc33,0.01f,0.8f,25,8.0f,0.018f,3.5f);
+
+        auto pbgt=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      int wt,float fo,float fc,float ft,float fq,float da,float det,float bd,float sub){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::GUITAR; p.guitWave=wt; p.filterOpen=fo; p.filterClose=fc;
+            p.filterTime=ft; p.lpQ=fq; p.distAmount=da; p.detuneCents=det; p.bodyDecay=bd; p.legSubGain=sub;
+            addPreset("PHONK_BR",p);
+        };
+        pbgt("pb_dist_gtr","GUITARRA DIST",   0xff228833,0.001f,1.0f,1,8000,2000,0.05f,3.5f,4.0f,12,0.10f,0.15f);
+
+        auto pbbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+            p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+            addPreset("PHONK_BR",p);
+        };
+        pbbag("pb_drone_dark","DRONE ESCURO", 0xff115522,0.20f,2.5f,0.50f,0.60f,120,0.5f,0.015f,1200,5.0f);
+
+        auto pbep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                      float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+            p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+            addPreset("PHONK_BR",p);
+        };
+        pbep("pb_ep_phonk","EP PHONK DIST",   0xff33ff55,0.02f,1.0f,9.0f,0.18f,15,5500,2.0f,0.40f,0.5f,0.10f,4.0f);
+
+        auto pboct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                       float lp,float lq,float sub,float det){
+            PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+            p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+            addPreset("PHONK_BR",p);
+        };
+        pboct("pb_dark_sine","BAIXO DARK",    0xff0a6618,0.01f,1.8f,260,1.5f,0.40f,0);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

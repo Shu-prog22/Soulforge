@@ -9,7 +9,8 @@
 // Engine types — mirrors the JS ENGINES object
 // ─────────────────────────────────────────────────────────────────────────────
 enum class EngineType { Legacy, SCIFI, VIKINGS, GYM, BASS808, VAPOR, HORROR,
-                        SAMURAI, CHERNOBYL, PIRATES, TRIBAL, GUITAR, BAGPIPES, JOLA_EP };
+                        SAMURAI, CHERNOBYL, PIRATES, TRIBAL, GUITAR, BAGPIPES, JOLA_EP,
+                        OCTOBER, SUPERSAW, GFUNK, ASTRO, YEEZY };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Preset parameters — one struct covers all engines
@@ -112,6 +113,27 @@ struct PresetParams
     float sustainLevel { 0.20f  }; // EP sustain level (0..1)
     float warmth       { 1.8f   }; // tape warmth saturation drive
     // (reuses legLpHz/legLpQ for filter, detuneCents for chorus)
+
+    // ── OCTOBER (underwater muffled keys) ─────────────────────────────────────
+    // reuses legLpHz, legLpQ, legSubGain, legDetune from Legacy
+
+    // ── SUPERSAW (multi-saw unison) ────────────────────────────────────────────
+    int   numSaws      { 5     }; // number of saw oscillators (1–7)
+    // reuses detuneCents from VIKINGS, saturation, legLpHz/legLpQ
+
+    // ── GFUNK (West Coast saw + portamento) ────────────────────────────────────
+    float portaDur     { 0.0f  }; // portamento duration seconds (0=off)
+    // reuses detuneCents, saturation, legLpHz, legLpQ, legSubGain
+
+    // ── ASTRO (distorted flute + wobble) ──────────────────────────────────────
+    float wobbleRate   { 2.0f  }; // wobble LFO rate Hz
+    float wobbleDepth  { 0.01f }; // wobble depth (freq ratio ±)
+    // reuses bitSteps (HORROR), distAmount (BASS808), legLpHz, legLpQ
+
+    // ── YEEZY (soul-chop / industrial / cathedral) ─────────────────────────────
+    int   yeezMode     { 0     }; // 0=triangle+HP, 1=square+clip, 2=sine+sub
+    float hpHz         { 0.0f  }; // high-pass cutoff Hz (mode 0)
+    // reuses saturation, legLpHz, legLpQ, legSubGain
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -200,8 +222,8 @@ private:
     double  freq        { 440.0   };
     double  time        { 0.0     };   // seconds since note-on
 
-    // Phases (up to 5 oscillators + LFO + drift)
-    std::array<double, 5> phase  {};
+    // Phases (up to 8 oscillators + LFO + drift)
+    std::array<double, 8> phase  {};
     double  lfoPhase    { 0.0 };
     double  driftPhase  { 0.0 };
 
@@ -235,6 +257,11 @@ private:
     double renderGUITAR   ();
     double renderBAGPIPES ();
     double renderJOLA_EP  ();
+    double renderOCTOBER  ();
+    double renderSUPERSAW ();
+    double renderGFUNK    ();
+    double renderASTRO    ();
+    double renderYEEZY    ();
 
     // ── helpers ──────────────────────────────────────────────────────────────
     double sawSample    (double ph) const { return 1.0 - 2.0 * ph; }
