@@ -2924,6 +2924,160 @@ void SoulForgeSynthAudioProcessor::buildBank()
         };
         pboct("pb_dark_sine","BAIXO DARK",    0xff0a6618,0.01f,1.8f,260,1.5f,0.40f,0);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ── PREMIUM ── Meilleure qualité sonore, tous engines au maximum ──────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    folderOrder.push_back("PREMIUM");
+    folders["PREMIUM"] = { "PREMIUM", Colour(0xffffd700) };
+
+    // ── SUPERSAW premium pads ─────────────────────────────────────────────────
+    auto prss=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  int ns,float det,float sat,float lp,float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::SUPERSAW; p.numSaws=ns; p.detuneCents=det;
+        p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq;
+        addPreset("PREMIUM",p);
+    };
+    prss("pr_wall",    "WALL OF SOUND",   0xffffd700, 0.30f,4.0f, 7,20.0f,1.4f,6000,0.7f);
+    prss("pr_anthem",  "ANTHEM RISE",     0xffffcc00, 0.80f,5.0f, 7,18.0f,1.2f,5000,0.6f);
+    prss("pr_gold",    "GOLD STRINGS",    0xfff0c020, 0.50f,4.5f, 7,14.0f,1.6f,4000,0.8f);
+    prss("pr_silver",  "SILVER BELLS",    0xffddddff, 0.20f,3.5f, 5,10.0f,1.0f,7000,1.2f);
+    prss("pr_dawn",    "DAWN RISE",       0xffffeeaa, 1.20f,6.0f, 7,22.0f,1.3f,3500,0.6f);
+    prss("pr_royal",   "ROYAL PAD",       0xffbb8800, 0.60f,5.0f, 7,16.0f,1.5f,4500,0.7f);
+    prss("pr_cosmos",  "COSMOS",          0xff8888ff, 1.00f,6.0f, 7,25.0f,1.1f,3000,0.5f);
+
+    // ── JOLA_EP premium keys ──────────────────────────────────────────────────
+    auto prep=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  float tr,float td,float det,float lp,float lq,float cl,float dc,float sl,float wm){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::JOLA_EP; p.tremoloRate=tr; p.tremoloDepth=td; p.detuneCents=det;
+        p.legLpHz=lp; p.legLpQ=lq; p.clickAmount=cl; p.epDecayTime=dc; p.sustainLevel=sl; p.warmth=wm;
+        addPreset("PREMIUM",p);
+    };
+    prep("pr_rhodes1", "VINTAGE RHODES",  0xffcc8833, 0.01f,2.5f, 3.0f,0.08f, 5,4500,0.7f,0.12f,2.0f,0.25f,1.6f);
+    prep("pr_rhodes2", "WARM RHODES",     0xffdd9944, 0.01f,3.0f, 2.5f,0.06f, 4,3500,0.6f,0.08f,2.5f,0.30f,2.0f);
+    prep("pr_ep_jazz", "JAZZ EP",         0xffeeaa55, 0.01f,2.0f, 4.0f,0.10f, 3,5500,0.8f,0.15f,1.8f,0.22f,1.4f);
+    prep("pr_ep_soul", "SOUL KEYS",       0xffff9900, 0.02f,2.8f, 3.5f,0.09f, 6,4000,0.7f,0.18f,2.2f,0.28f,2.2f);
+    prep("pr_ep_lux",  "LUXURY EP",       0xfffff0c0, 0.01f,3.5f, 2.0f,0.05f, 2,6000,0.6f,0.06f,3.0f,0.35f,1.8f);
+
+    // ── GFUNK premium leads ───────────────────────────────────────────────────
+    auto prgf=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  float det,float sat,float lp,float lq,float sub,float pd){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::GFUNK; p.detuneCents=det; p.saturation=sat;
+        p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.portaDur=pd;
+        addPreset("PREMIUM",p);
+    };
+    prgf("pr_silk",    "SILK LEAD",       0xffff8844, 0.01f,1.8f, 10,1.8f,3200,1.2f,0.2f,0.06f);
+    prgf("pr_glide1",  "SMOOTH GLIDE",    0xffff6622, 0.01f,2.0f,  8,2.0f,2800,1.0f,0.3f,0.10f);
+    prgf("pr_west",    "WEST COAST",      0xffdd4400, 0.01f,1.5f, 12,2.4f,3500,1.5f,0.1f,0.05f);
+    prgf("pr_velvet",  "VELVET",          0xffcc6633, 0.02f,2.2f,  6,1.6f,4000,0.8f,0.4f,0.08f);
+
+    // ── SCIFI premium FM ──────────────────────────────────────────────────────
+    auto prsc=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  float mr,float mi,float lf,float ld,float lp,float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::SCIFI; p.modRatio=mr; p.modIndex=mi;
+        p.lfoFreq=lf; p.lfoDepth=ld; p.legLpHz=lp; p.lpQ=lq;
+        addPreset("PREMIUM",p);
+    };
+    prsc("pr_bell",    "CRYSTAL BELL",    0xffaaddff, 0.01f,4.0f, 2.0f, 6.0f,0.3f,1.5f,8000,3.0f);
+    prsc("pr_fm_gold", "FM GOLD",         0xffffff88, 0.01f,3.0f, 3.5f, 8.0f,0.5f,2.5f,6000,4.0f);
+    prsc("pr_electric","ELECTRIC PIANO",  0xffddffaa, 0.01f,2.5f, 1.0f, 5.0f,0.2f,1.0f,7000,2.5f);
+    prsc("pr_angelic", "ANGELIC",         0xffbbccff, 0.10f,5.0f, 4.0f, 3.0f,0.8f,0.8f,5000,2.0f);
+
+    // ── VAPOR premium atmosphere ──────────────────────────────────────────────
+    auto prvp=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  float ls,float le,float st,float vr,int wv){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::VAPOR; p.lpStartHz=ls; p.lpEndHz=le; p.sweepTime=st;
+        p.vapVibRate=vr; p.vapWave=wv;
+        addPreset("PREMIUM",p);
+    };
+    prvp("pr_dream",   "DREAM STATE",     0xffff88ff, 1.50f,6.0f,  300,5000,3.0f,0.2f,0);
+    prvp("pr_ether",   "ETHER",           0xffcc88ff, 2.00f,7.0f,  200,4000,4.0f,0.15f,2);
+    prvp("pr_aurora",  "AURORA",          0xff88ffcc, 1.00f,5.0f,  400,6000,2.5f,0.3f,1);
+    prvp("pr_vapor_lx","VAPOR LUXE",      0xffffaaee, 0.80f,5.5f,  600,8000,2.0f,0.25f,0);
+
+    // ── OCTOBER premium depth ─────────────────────────────────────────────────
+    auto proct=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                   float lp,float lq,float sub,float det){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::OCTOBER; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub; p.legDetune=det;
+        addPreset("PREMIUM",p);
+    };
+    proct("pr_deep",   "DEEP WATER",      0xff2244aa, 0.30f,4.0f,  500,1.5f,0.5f, 4);
+    proct("pr_abyss",  "ABYSS",           0xff112266, 0.50f,5.0f,  300,1.2f,0.6f, 6);
+    proct("pr_tide",   "MIDNIGHT TIDE",   0xff3355bb, 0.20f,3.5f,  700,1.8f,0.4f, 3);
+
+    // ── BAGPIPES premium organic ──────────────────────────────────────────────
+    auto prbag=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                   float pw,float dg,float dlp,float vr,float vd,float br,float nq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::BAGPIPES; p.pulseWidth=pw; p.droneGain=dg; p.droneLPHz=dlp;
+        p.lfoFreq=vr; p.bagVibDepth=vd; p.legLpHz=br; p.lpQ=nq;
+        addPreset("PREMIUM",p);
+    };
+    prbag("pr_chanter","HIGHLAND",        0xff44aa44, 0.05f,1.5f, 0.20f,0.40f,260,5.5f,0.010f,2800,6.0f);
+    prbag("pr_drone",  "CELTIC DRONE",    0xff336633, 0.10f,2.0f, 0.30f,0.60f,200,4.0f,0.008f,2000,5.0f);
+
+    // ── ASTRO premium texture ─────────────────────────────────────────────────
+    auto prastr=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                    float wr,float wd,int bits,float dist,float lp,float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::ASTRO; p.wobbleRate=wr; p.wobbleDepth=wd;
+        p.bitSteps=bits; p.distAmount=dist; p.legLpHz=lp; p.legLpQ=lq;
+        addPreset("PREMIUM",p);
+    };
+    prastr("pr_flute",  "ASTRO FLUTE",    0xff8b5a00, 0.02f,1.8f, 3.5f,0.012f,255,1.2f,4500,0.8f);
+    prastr("pr_travis", "TRAVIS MELODY",  0xff5a3500, 0.02f,2.0f, 2.0f,0.008f,255,1.5f,3500,1.0f);
+
+    // ── GUITAR premium pluck ──────────────────────────────────────────────────
+    auto prgut=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                   int wv,float fo,float fc,float ft,float bd,float dist,float det,float sub,float fq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::GUITAR; p.guitWave=wv; p.filterOpen=fo; p.filterClose=fc;
+        p.filterTime=ft; p.bodyDecay=bd; p.distAmount=dist; p.detuneCents=det;
+        p.legSubGain=sub; p.lpQ=fq;
+        addPreset("PREMIUM",p);
+    };
+    prgut("pr_elec",    "ELECTRIC PLUCK", 0xffcc4400, 0.01f,1.5f, 0,6000,600,0.08f,0.25f,1.8f, 4,0.0f,2.5f);
+    prgut("pr_acoustic","ACOUSTIC",       0xffddaa44, 0.01f,1.2f, 0,4000,800,0.12f,0.30f,1.2f, 2,0.0f,2.0f);
+
+    // ── SAMURAI premium pluck ─────────────────────────────────────────────────
+    auto prsam=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                   float pd,float hm,float lq){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::SAMURAI; p.pluckDecay=pd; p.harmMix=hm; p.lpQ=lq;
+        addPreset("PREMIUM",p);
+    };
+    prsam("pr_koto",    "KOTO",           0xffcc2200, 0.001f,1.2f, 0.30f,0.30f,4.0f);
+    prsam("pr_sitar",   "SITAR",          0xffaa3300, 0.001f,1.5f, 0.40f,0.45f,5.0f);
+    prsam("pr_shamisen","SHAMISEN",       0xffbb1100, 0.001f,0.8f, 0.20f,0.20f,3.5f);
+
+    // ── BASS808 premium subs ──────────────────────────────────────────────────
+    auto prb8=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  float sf,float sd,float dist,float sub){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::BASS808; p.slideFrom=sf; p.slideDur=sd; p.distAmount=dist; p.b8Sub=sub;
+        addPreset("PREMIUM",p);
+    };
+    prb8("pr_808_god",  "808 GOD",        0xffff2200, 0.01f,2.5f, 2.5f,0.10f,2.0f,0.3f);
+    prb8("pr_808_soft", "808 SOFT",       0xffff5500, 0.01f,3.0f, 1.5f,0.06f,1.4f,0.0f);
+    prb8("pr_808_hard", "808 HARD",       0xffcc1100, 0.01f,2.0f, 3.0f,0.14f,3.5f,0.5f);
+
+    // ── YEEZY premium mode 2 (cathedral sine+sub) ─────────────────────────────
+    auto prye=[&](const char* id,const char* name,uint32 col,float atk,float rel,
+                  int mode,float hp,float sat,float lp,float lq,float sub){
+        PresetParams p; p.id=id; p.name=name; p.colour=Colour(col); p.atk=atk; p.rel=rel;
+        p.engine=EngineType::YEEZY; p.yeezMode=mode; p.hpHz=hp;
+        p.saturation=sat; p.legLpHz=lp; p.legLpQ=lq; p.legSubGain=sub;
+        addPreset("PREMIUM",p);
+    };
+    prye("pr_cathedral","CATHEDRAL",      0xffc8a000, 1.00f,6.0f, 2,0.0f,1.0f,4000,0.6f,0.5f);
+    prye("pr_soulchop", "SOUL CHOP",      0xffddbb00, 0.01f,1.8f, 0,200,1.0f,5000,0.8f,0.0f);
+    prye("pr_industry", "INDUSTRY",       0xffaa8800, 0.01f,1.5f, 1,0.0f,2.5f,6000,1.5f,0.3f);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
