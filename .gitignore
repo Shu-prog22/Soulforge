@@ -1,0 +1,28 @@
+# Build directories
+vst-source/build-win/
+vst-source/build-mac/
+vst-source/external/JUCE/
+
+# JUCE (cloné séparément au build)
+external/
+
+# Node modules
+mon-synth/node_modules/
+
+# Binaires compilés locaux
+*.o
+*.a
+*.so
+*.dylib
+SoulForgeSynth.vst3.zip
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# llvm-mingw toolchain (gros fichier local)
+/home/milann/tools/

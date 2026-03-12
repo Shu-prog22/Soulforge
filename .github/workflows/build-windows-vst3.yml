@@ -1,0 +1,38 @@
+name: Build VST3 Windows
+
+on:
+  workflow_dispatch:   # déclenchement manuel depuis GitHub UI
+  push:
+    paths:
+      - 'vst-source/src/**'
+      - 'vst-source/CMakeLists.txt'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        working-directory: vst-source
+        run: git clone --depth=1 --branch 8.0.12 https://github.com/juce-framework/JUCE.git external/JUCE
+
+      - name: Configure CMake
+        working-directory: vst-source
+        run: |
+          cmake -B build-win -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        working-directory: vst-source
+        run: cmake --build build-win --config Release
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoulForge-Synth-VST3-Windows
+          path: |
+            vst-source/build-win/SoulForgeSynth_artefacts/Release/VST3/
+          retention-days: 30
